@@ -13,6 +13,7 @@ COB_SDO_TX_BASE  = 0x580
 COB_RPDO1_BASE   = 0x200
 COB_RPDO2_BASE   = 0x300
 COB_RPDO3_BASE   = 0x400
+COB_RPDO4_BASE   = 0x500
 COB_TPDO1_BASE   = 0x180
 COB_HEARTBEAT    = 0x700
 
@@ -23,6 +24,7 @@ CW_ENABLE_OPERATION = 0x000F
 CW_HALT_BIT         = 0x0100  # bit8
 
 # Modes of Operation
+MODE_POSITION = 1
 MODE_TORQUE   = 4
 MODE_VELOCITY = 3
 
@@ -148,6 +150,16 @@ def sdo_write_u32(ser, index, subindex, value):
     ])
     send_can(ser, COB_SDO_RX_BASE + NODE_ID, data)
 
+def sdo_write_i32(ser, index, subindex, value):
+    v = int(value).to_bytes(4, "little", signed=True)
+    data = bytes([
+        0x23,
+        index & 0xFF, (index >> 8) & 0xFF,
+        subindex,
+        v[0], v[1], v[2], v[3]
+    ])
+    send_can(ser, COB_SDO_RX_BASE + NODE_ID, data)
+
 # === NMT ===
 
 def nmt_send(ser, command, node_id):
@@ -169,9 +181,15 @@ def rpdo2_send(ser, torque_slope, velocity_limit):
     data[4:8] = int(velocity_limit).to_bytes(4, "little", signed=True)
     send_can(ser, COB_RPDO2_BASE + NODE_ID, bytes(data))
 
-def rpdo3_send(ser, target_velocity):
-    data = int(target_velocity).to_bytes(4, "little", signed=True)
-    send_can(ser, COB_RPDO3_BASE + NODE_ID, data)
+def rpdo3_send(ser, target_velocity, target_position):
+    data = bytearray(8)
+    data[0:4] = int(target_velocity).to_bytes(4, "little", signed=True)
+    data[4:8] = int(target_position).to_bytes(4, "little", signed=True)
+    send_can(ser, COB_RPDO3_BASE + NODE_ID, bytes(data))
+
+def rpdo4_send(ser, profile_velocity):
+    data = int(profile_velocity).to_bytes(4, "little", signed=False)
+    send_can(ser, COB_RPDO4_BASE + NODE_ID, data)
 
 # === Drive control ===
 
@@ -241,7 +259,7 @@ def main():
                 cw = CW_ENABLE_OPERATION
                 rpdo1_send(ser, cw, MODE_VELOCITY, target_torque=0)
                 time.sleep(0.02)
-                rpdo3_send(ser, target_velocity=TARGET_VELOCITY)
+                rpdo3_send(ser, target_velocity=TARGET_VELOCITY, target_position=0)
                 running = True
                 print(f"Start (velocity={TARGET_VELOCITY})")
             elif cmd == "x":
@@ -249,7 +267,7 @@ def main():
                 cw = CW_ENABLE_OPERATION | CW_HALT_BIT
                 rpdo1_send(ser, cw, MODE_VELOCITY, target_torque=0)
                 time.sleep(0.02)
-                rpdo3_send(ser, target_velocity=0)
+                rpdo3_send(ser, target_velocity=0, target_position=0)
                 time.sleep(0.05)
                 disable_drive_sdo(ser)
                 running = False
@@ -261,7 +279,7 @@ def main():
             # Safety stop on exit
             cw = CW_ENABLE_OPERATION | CW_HALT_BIT
             rpdo1_send(ser, cw, MODE_VELOCITY, target_torque=0)
-            rpdo3_send(ser, target_velocity=0)
+            rpdo3_send(ser, target_velocity=0, target_position=0)
             disable_drive_sdo(ser)
 
 if __name__ == "__main__":
