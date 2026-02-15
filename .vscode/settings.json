@@ -1,3 +1,7 @@
 {
-    "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.2/"
+    "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.2/",
+    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportIndentationErrors": "none"
+    }
 }

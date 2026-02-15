@@ -1,3 +1,7 @@
-from motor_canopen import testbench
+from gui import main
 
-testbench()
+
+if __name__ == "__main__":
+    main()
+
+
