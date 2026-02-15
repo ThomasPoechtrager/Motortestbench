@@ -1,21 +1,14 @@
 import sys
-from PySide6 import QtCore, QtWidgets
-import pyqtgraph as pg
-import serial
-import struct
 import time
 from collections import deque
+from typing import Any, cast
+
+from PySide6 import QtCore, QtWidgets
+import pyqtgraph as pg
 
 from config import (
-    COM_PORT, SERIAL_BAUD, CAN_BITRATE_CODE, NODE_ID,
-    COB_NMT, COB_SDO_RX_BASE, COB_SDO_TX_BASE,
-    COB_RPDO1_BASE, COB_RPDO2_BASE, COB_RPDO3_BASE, COB_RPDO4_BASE,
-    COB_TPDO1_BASE, COB_HEARTBEAT,
-    CW_SHUTDOWN, CW_SWITCH_ON, CW_ENABLE_OPERATION, CW_HALT_BIT, CW_DISABLE_VOLTAGE,
     MODE_POSITION, MODE_TORQUE, MODE_VELOCITY,
-    PROFILE_VELOCITY_DEFAULT, PROFILE_ACCEL_DEFAULT, PROFILE_DECEL_DEFAULT,
-    QUICK_STOP_DECEL_DEFAULT, MAX_PROFILE_VELOCITY_DEFAULT,
-    TORQUE_INPUT_SCALE, TORQUE_SLOPE_SCALE
+    TORQUE_SLOPE_SCALE
 )
 from drive_data import DriveState
 from m56s_drive_ctrl import DriveController
@@ -106,7 +99,14 @@ class MainWindow(QtWidgets.QWidget):
         self._last_pos_cm = 0.0
         self._last_vel_cm_s = 0.0
         self._last_torque_mnm = 0.0
-        self._plot_item = self.plot.getPlotItem()
+        plot_item = self.plot.getPlotItem()
+        if plot_item is None:
+            raise RuntimeError("Plot item not available")
+        self._plot_item = plot_item
+        vb = self._plot_item.vb
+        if vb is None:
+            raise RuntimeError("Plot view box not available")
+        self._plot_vb = cast(Any, vb)
         self._plot_item.setLabel("left", "Position", units="cm")
         self._plot_item.showAxis("right")
         self._plot_item.getAxis("right").setLabel("Speed", units="cm/s")
@@ -118,14 +118,15 @@ class MainWindow(QtWidgets.QWidget):
 
         self._torque_axis = pg.AxisItem(orientation="right")
         self._torque_axis.setLabel("Torque", units="mNm")
-        self._plot_item.layout.addItem(self._torque_axis, 1, 3)
+        plot_layout = cast(Any, self._plot_item).layout
+        plot_layout.addItem(self._torque_axis, 1, 3)
 
         self._torque_view = pg.ViewBox()
         self._plot_item.scene().addItem(self._torque_view)
         self._torque_axis.linkToView(self._torque_view)
         self._torque_view.setXLink(self._plot_item)
 
-        self._plot_item.vb.sigResized.connect(self._update_viewboxes)
+        self._plot_vb.sigResized.connect(self._update_viewboxes)
         self._update_viewboxes()
 
         self._curve_pos = self._plot_item.plot(pen=pg.mkPen("#5cb85c", width=2))
@@ -181,10 +182,10 @@ class MainWindow(QtWidgets.QWidget):
 
         # Controller thread
         self.state = DriveState()
-        self.thread = QtCore.QThread(self)
+        self.worker_thread = QtCore.QThread(self)
         self.controller = DriveController(self.state)
-        self.controller.moveToThread(self.thread)
-        self.thread.started.connect(self.controller.start_polling)
+        self.controller.moveToThread(self.worker_thread)
+        self.worker_thread.started.connect(self.controller.start_polling)
 
         # Signals
         self.btn_connect.clicked.connect(self._on_connect_clicked)
@@ -245,7 +246,7 @@ class MainWindow(QtWidgets.QWidget):
     def _target_torque_committed(self):
         self.target_torque_spin.interpretText()
         self.state.update_command(target_torque_mnm=self.target_torque_spin.value())
-        
+
 
     def _target_position_committed(self):
         self.state.update_command(target_position_cm=self.target_position_spin.value())
@@ -276,7 +277,10 @@ class MainWindow(QtWidgets.QWidget):
         self._update_status_bits(fb.statusword)
 
         self.tpdo2_label.setText(
-            f"TPDO2: pos={fb.position_cm:.2f} cm vel={fb.speed_cm_s:.2f} cm/s ({fb.speed_rpm:.0f} rpm)"
+            (
+                f"TPDO2: pos={fb.position_cm:.2f} cm vel={fb.speed_cm_s:.2f} cm/s "
+                f"({fb.speed_rpm:.0f} rpm)"
+            )
         )
 
         torque_nm = fb.torque_mnm / 1000.0
@@ -311,13 +315,13 @@ class MainWindow(QtWidgets.QWidget):
         self._curve_vel.setData(t_rel, list(self._vel))
         self._curve_torque.setData(t_rel, list(self._torque))
         x_max = min(self._plot_window_s, t) if t > 0 else self._plot_window_s
-        self._plot_item.setXRange(0.0, x_max, padding=0.0)
+        cast(Any, self._plot_item).setXRange(0.0, x_max, padding=0.0)
 
     def _update_viewboxes(self):
-        self._vel_view.setGeometry(self._plot_item.vb.sceneBoundingRect())
-        self._vel_view.linkedViewChanged(self._plot_item.vb, self._vel_view.XAxis)
-        self._torque_view.setGeometry(self._plot_item.vb.sceneBoundingRect())
-        self._torque_view.linkedViewChanged(self._plot_item.vb, self._torque_view.XAxis)
+        self._vel_view.setGeometry(self._plot_vb.sceneBoundingRect())
+        self._vel_view.linkedViewChanged(self._plot_vb, self._vel_view.XAxis)
+        self._torque_view.setGeometry(self._plot_vb.sceneBoundingRect())
+        self._torque_view.linkedViewChanged(self._plot_vb, self._torque_view.XAxis)
 
     def _reset_plot(self):
         self._plot_start = time.monotonic()
@@ -329,23 +333,23 @@ class MainWindow(QtWidgets.QWidget):
         self._curve_pos.clear()
         self._curve_vel.clear()
         self._curve_torque.clear()
-        self._plot_item.setXRange(0.0, self._plot_window_s, padding=0.0)
+        cast(Any, self._plot_item).setXRange(0.0, self._plot_window_s, padding=0.0)
 
     def _toggle_plot_pause(self):
         self._plot_paused = not self._plot_paused
         self.btn_pause_plot.setText("Resume plot" if self._plot_paused else "Pause plot")
 
     def _on_connect_clicked(self):
-        if not self.thread.isRunning():
-            self.thread.start()
+        if not self.worker_thread.isRunning():
+            self.worker_thread.start()
         self.state.update_flags(request_connect=True)
 
     def _on_disconnect_clicked(self):
-        if self.thread.isRunning():
+        if self.worker_thread.isRunning():
             self.state.update_flags(request_disconnect=True)
             QtCore.QThread.msleep(100)
-            self.thread.quit()
-            self.thread.wait(500)
+            self.worker_thread.quit()
+            self.worker_thread.wait(500)
 
     def _on_start_clicked(self):
         self.state.update_flags(request_start=True)
@@ -400,11 +404,11 @@ class MainWindow(QtWidgets.QWidget):
             )
 
     def closeEvent(self, event):
-        if self.thread.isRunning():
+        if self.worker_thread.isRunning():
             self.state.update_flags(request_disconnect=True)
             QtCore.QThread.msleep(100)
-            self.thread.quit()
-            self.thread.wait(500)
+            self.worker_thread.quit()
+            self.worker_thread.wait(500)
         super().closeEvent(event)
 
 def main():

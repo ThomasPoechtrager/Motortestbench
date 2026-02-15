@@ -1,7 +1,10 @@
 {
-    "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.5.2/",
-    "python.analysis.typeCheckingMode": "off",
+    "python.analysis.typeCheckingMode": "basic",
     "python.analysis.diagnosticSeverityOverrides": {
-        "reportIndentationErrors": "none"
+        "reportIndentationInconsistency": "none"
+    },
+    "[python]": {
+        "editor.insertSpaces": true,
+        "editor.tabSize": 4
     }
 }

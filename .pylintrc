@@ -1,0 +1,5 @@
+[MESSAGES CONTROL]
+disable=missing-module-docstring,missing-class-docstring,missing-function-docstring
+
+[TYPECHECK]
+extension-pkg-allow-list=PySide6.QtWidgets,PySide6.QtCore,PySide6.QtGui

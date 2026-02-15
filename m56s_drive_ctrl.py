@@ -1,5 +1,5 @@
-import serial
 import struct
+import serial
 from PySide6 import QtCore
 
 from config import (
@@ -181,7 +181,7 @@ class DriveController(QtCore.QObject):
     def start_polling(self):
         """Start poll timer when thread starts"""
         self._ensure_timers()
-        if not self._timer.isActive():
+        if self._timer and not self._timer.isActive():
             self._timer.start()
             self.status.emit("Polling started")
 
@@ -231,7 +231,7 @@ class DriveController(QtCore.QObject):
 
             self._state.update_flags(connected=True)
             self.status.emit("Connected")
-        except Exception as e:
+        except (serial.SerialException, OSError, ValueError) as e:
             self.status.emit(f"Connect error: {e}")
 
     @QtCore.Slot()
@@ -247,7 +247,7 @@ class DriveController(QtCore.QObject):
         if self.ser:
             try:
                 self.ser.close()
-            except Exception:
+            except (serial.SerialException, OSError):
                 pass
             self.ser = None
         if self._tx_timer:
@@ -268,10 +268,12 @@ class DriveController(QtCore.QObject):
         rpdo1_send(self.ser, CW_SWITCH_ON, cmd.mode, target_torque=0)
         QtCore.QThread.msleep(20)
         rpdo1_send(self.ser, CW_ENABLE_OPERATION, cmd.mode, target_torque=0)
-        self._tx_timer.setInterval(self.tx_interval_ms)
+        if self._tx_timer:
+            self._tx_timer.setInterval(self.tx_interval_ms)
         self.running = True
         self._state.update_flags(running=True)
-        self._tx_timer.start()
+        if self._tx_timer:
+            self._tx_timer.start()
         self.status.emit("Started")
 
     @QtCore.Slot()
@@ -316,7 +318,7 @@ class DriveController(QtCore.QObject):
     def _send_cyclic(self):
         if not self.ser or not self.running:
             return
-        
+
         snapshot = self._state.snapshot()
         cmd = snapshot.command
         self._sync_cycle_time(cmd.cycle_time_ms)
