@@ -38,8 +38,8 @@ MAX_PROFILE_VELOCITY_DEFAULT = 800000
 # Scaling/constants
 RPM_TO_RAW = 10000 / 60
 INC_PER_REV = 10000
-SHAFT_RADIUS_CM = 6.0
-GEAR_RATIO = 5.0  # motor revs per shaft rev
+SHAFT_RADIUS_CM = 7.0
+GEAR_RATIO = 4.5  # motor revs per shaft rev
 CM_PER_SHAFT_REV = 2 * math.pi * SHAFT_RADIUS_CM
 RATED_TORQUE_NM = 2.4
 RATED_CURRENT_A = 4.5
