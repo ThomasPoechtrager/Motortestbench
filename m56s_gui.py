@@ -4,17 +4,156 @@ import pyqtgraph as pg
 import serial
 import struct
 import math
+import time
+from collections import deque
 
-# Reuse existing CAN helpers/constants
-from m56s_heartbeat import (
-    COM_PORT, SERIAL_BAUD, CAN_BITRATE_CODE, NODE_ID,
-    MODE_POSITION, MODE_TORQUE, MODE_VELOCITY,
-    CW_SHUTDOWN, CW_SWITCH_ON, CW_ENABLE_OPERATION, CW_HALT_BIT,
-    build_config_cmd_fixed20,
-    checksum_low8,
-    sdo_write_u8, sdo_write_u16, sdo_write_u32, sdo_write_i32, nmt_send,
-    rpdo1_send, rpdo2_send, rpdo3_send, rpdo4_send
-)
+# CANopen/Waveshare configuration
+COM_PORT = "COM17"
+SERIAL_BAUD = 2_000_000  # Waveshare default serial baud
+CAN_BITRATE_CODE = 0x01  # 1 Mbps
+NODE_ID = 1
+
+# CANopen COB-IDs
+COB_NMT = 0x000
+COB_SDO_RX_BASE = 0x600
+COB_SDO_TX_BASE = 0x580
+COB_RPDO1_BASE = 0x200
+COB_RPDO2_BASE = 0x300
+COB_RPDO3_BASE = 0x400
+COB_RPDO4_BASE = 0x500
+COB_TPDO1_BASE = 0x180
+COB_HEARTBEAT = 0x700
+
+# CiA402 Controlword
+CW_SHUTDOWN = 0x0006
+CW_SWITCH_ON = 0x0007
+CW_ENABLE_OPERATION = 0x000F
+CW_HALT_BIT = 0x0100  # bit8
+
+# Modes of Operation
+MODE_POSITION = 1
+MODE_TORQUE = 4
+MODE_VELOCITY = 3
+
+def checksum_low8(data: bytes) -> int:
+    return sum(data) & 0xFF
+
+def build_can_frame_fixed20(can_id: int, data: bytes) -> bytes:
+    if len(data) > 8:
+        raise ValueError("CAN data length > 8")
+
+    f_type = 0x01   # standard
+    f_format = 0x01 # data
+    dlc = len(data) & 0x0F
+    data_padded = data + bytes(8 - len(data))
+
+    frame = bytearray(20)
+    frame[0] = 0xAA
+    frame[1] = 0x55
+    frame[2] = 0x01             # data frame type
+    frame[3] = f_type
+    frame[4] = f_format
+    frame[5:9] = can_id.to_bytes(4, byteorder="little", signed=False)
+    frame[9] = dlc
+    frame[10:18] = data_padded
+    frame[18] = 0x00
+    frame[19] = checksum_low8(frame[2:19])
+    return bytes(frame)
+
+def build_config_cmd_fixed20(can_bitrate_code: int,
+                             frame_type: int = 0x01,
+                             filter_id: int = 0x00000000,
+                             mask_id: int = 0x00000000,
+                             can_mode: int = 0x00,
+                             auto_retx: int = 0x00) -> bytes:
+    frame = bytearray(20)
+    frame[0] = 0xAA
+    frame[1] = 0x55
+    frame[2] = 0x12  # config frame type
+    frame[3] = can_bitrate_code & 0xFF
+    frame[4] = frame_type & 0xFF
+    frame[5] = can_mode & 0xFF
+    frame[6] = auto_retx & 0xFF
+    frame[7:11] = filter_id.to_bytes(4, "little", signed=False)
+    frame[11:15] = mask_id.to_bytes(4, "little", signed=False)
+    frame[15] = 0x00
+    frame[16] = 0x00
+    frame[17] = 0x00
+    frame[18] = 0x00
+    frame[19] = checksum_low8(frame[2:19])
+    return bytes(frame)
+
+def send_can(ser: serial.Serial, can_id: int, data: bytes):
+    frame = build_can_frame_fixed20(can_id, data)
+    ser.write(frame)
+    ser.flush()
+
+def sdo_write_u8(ser, index, subindex, value):
+    data = bytes([
+        0x2F,
+        index & 0xFF, (index >> 8) & 0xFF,
+        subindex,
+        value & 0xFF,
+        0x00, 0x00, 0x00
+    ])
+    send_can(ser, COB_SDO_RX_BASE + NODE_ID, data)
+
+def sdo_write_u16(ser, index, subindex, value):
+    data = bytes([
+        0x2B,
+        index & 0xFF, (index >> 8) & 0xFF,
+        subindex,
+        value & 0xFF, (value >> 8) & 0xFF,
+        0x00, 0x00
+    ])
+    send_can(ser, COB_SDO_RX_BASE + NODE_ID, data)
+
+def sdo_write_u32(ser, index, subindex, value):
+    data = bytes([
+        0x23,
+        index & 0xFF, (index >> 8) & 0xFF,
+        subindex,
+        value & 0xFF, (value >> 8) & 0xFF,
+        (value >> 16) & 0xFF, (value >> 24) & 0xFF
+    ])
+    send_can(ser, COB_SDO_RX_BASE + NODE_ID, data)
+
+def sdo_write_i32(ser, index, subindex, value):
+    v = int(value).to_bytes(4, "little", signed=True)
+    data = bytes([
+        0x23,
+        index & 0xFF, (index >> 8) & 0xFF,
+        subindex,
+        v[0], v[1], v[2], v[3]
+    ])
+    send_can(ser, COB_SDO_RX_BASE + NODE_ID, data)
+
+def nmt_send(ser, command, node_id):
+    send_can(ser, COB_NMT, bytes([command, node_id]))
+
+def rpdo1_send(ser, controlword, mode, target_torque):
+    data = bytearray(8)
+    data[0:2] = int(controlword).to_bytes(2, "little", signed=False)
+    data[2] = int(mode) & 0xFF
+    data[3:5] = int(target_torque).to_bytes(2, "little", signed=True)
+    data[5] = 0x00
+    send_can(ser, COB_RPDO1_BASE + NODE_ID, bytes(data[:5]))
+
+def rpdo2_send(ser, torque_slope, velocity_limit):
+    data = bytearray(8)
+    data[0:4] = int(torque_slope).to_bytes(4, "little", signed=True)
+    data[4:8] = int(velocity_limit).to_bytes(4, "little", signed=True)
+    send_can(ser, COB_RPDO2_BASE + NODE_ID, bytes(data))
+
+def rpdo3_send(ser, target_velocity, target_position):
+    data = bytearray(8)
+    data[0:4] = int(target_velocity).to_bytes(4, "little", signed=True)
+    data[4:8] = int(target_position).to_bytes(4, "little", signed=True)
+    send_can(ser, COB_RPDO3_BASE + NODE_ID, bytes(data))
+
+def rpdo4_send(ser, profile_velocity):
+    data = int(profile_velocity).to_bytes(4, "little", signed=False)
+    send_can(ser, COB_RPDO4_BASE + NODE_ID, data)
 
 RPM_TO_RAW = 10000 / 60
 INC_PER_REV = 10000
@@ -275,6 +414,17 @@ class CanWorker(QtCore.QObject):
         self.running = False
         self.status.emit("Stopped")
 
+    @QtCore.Slot()
+    def fault_reset(self):
+        if not self.ser:
+            self.status.emit("Not connected")
+            return
+        cw = CW_SHUTDOWN | 0x0080
+        rpdo1_send(self.ser, cw, self.mode, target_torque=0)
+        QtCore.QThread.msleep(20)
+        rpdo1_send(self.ser, CW_SHUTDOWN, self.mode, target_torque=0)
+        self.status.emit("Fault reset sent")
+
     def _send_disable_sequence(self):
         cw = CW_ENABLE_OPERATION | CW_HALT_BIT
         if self.mode == MODE_VELOCITY:
@@ -469,20 +619,61 @@ class MainWindow(QtWidgets.QWidget):
         self.btn_disconnect = QtWidgets.QPushButton("Disconnect")
         self.btn_start = QtWidgets.QPushButton("Start")
         self.btn_stop = QtWidgets.QPushButton("Stop")
+        self.btn_fault_reset = QtWidgets.QPushButton("Fault reset")
 
         self.status = QtWidgets.QLabel("Disconnected")
-        self.rx_label = QtWidgets.QLabel("RX frames: 0")
-        self.rx_bytes_label = QtWidgets.QLabel("RX bytes: 0")
-        self.frame_debug_label = QtWidgets.QLabel("Last TPDO: -")
         self.tpdo1_label = QtWidgets.QLabel("TPDO1: status=0x---- err=0x---- mode=--")
         self.tpdo2_label = QtWidgets.QLabel("TPDO2: pos=0 vel=0 rpm")
         self.tpdo3_label = QtWidgets.QLabel("TPDO3: current=0 torque=0")
         self.statusword_label = QtWidgets.QLabel("Statusword: 0x----")
         self.status_bits_group = self._build_status_bits()
 
-        # Plot placeholder
-        self.plot = pg.PlotWidget(title="Telemetry (placeholder)")
-        self.plot.plot([0, 1, 2], [0, 0, 0])
+        # Plot
+        self.plot = pg.PlotWidget(title="Telemetry")
+        self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.showGrid(x=True, y=True, alpha=0.2)
+        self._plot_start = time.monotonic()
+        self._plot_window_s = 20.0
+        self._plot_interval_s = 0.1
+        self._last_plot_t = 0.0
+        self._plot_paused = False
+        self._t = deque(maxlen=20000)
+        self._pos = deque(maxlen=20000)
+        self._vel = deque(maxlen=20000)
+        self._torque = deque(maxlen=20000)
+        self._last_pos_cm = 0.0
+        self._last_vel_cm_s = 0.0
+        self._last_torque_mnm = 0.0
+        self._plot_item = self.plot.getPlotItem()
+        self._plot_item.setLabel("left", "Position", units="cm")
+        self._plot_item.showAxis("right")
+        self._plot_item.getAxis("right").setLabel("Speed", units="cm/s")
+
+        self._vel_view = pg.ViewBox()
+        self._plot_item.scene().addItem(self._vel_view)
+        self._plot_item.getAxis("right").linkToView(self._vel_view)
+        self._vel_view.setXLink(self._plot_item)
+
+        self._torque_axis = pg.AxisItem(orientation="right")
+        self._torque_axis.setLabel("Torque", units="mNm")
+        self._plot_item.layout.addItem(self._torque_axis, 1, 3)
+
+        self._torque_view = pg.ViewBox()
+        self._plot_item.scene().addItem(self._torque_view)
+        self._torque_axis.linkToView(self._torque_view)
+        self._torque_view.setXLink(self._plot_item)
+
+        self._plot_item.vb.sigResized.connect(self._update_viewboxes)
+        self._update_viewboxes()
+
+        self._curve_pos = self._plot_item.plot(pen=pg.mkPen("#5cb85c", width=2))
+        self._curve_vel = pg.PlotCurveItem(pen=pg.mkPen("#5bc0de", width=2))
+        self._vel_view.addItem(self._curve_vel)
+        self._curve_torque = pg.PlotCurveItem(pen=pg.mkPen("#f0ad4e", width=2))
+        self._torque_view.addItem(self._curve_torque)
+
+        self.btn_reset_plot = QtWidgets.QPushButton("Reset plot")
+        self.btn_pause_plot = QtWidgets.QPushButton("Pause plot")
 
         # Layout
         form = QtWidgets.QFormLayout()
@@ -501,19 +692,29 @@ class MainWindow(QtWidgets.QWidget):
         btns.addWidget(self.btn_disconnect)
         btns.addWidget(self.btn_start)
         btns.addWidget(self.btn_stop)
+        btns.addWidget(self.btn_fault_reset)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(btns)
         layout.addWidget(self.status)
-        layout.addWidget(self.rx_label)
-        layout.addWidget(self.rx_bytes_label)
-        layout.addWidget(self.frame_debug_label)
-        layout.addWidget(self.tpdo1_label)
-        layout.addWidget(self.statusword_label)
-        layout.addWidget(self.status_bits_group)
-        layout.addWidget(self.tpdo2_label)
-        layout.addWidget(self.tpdo3_label)
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.addWidget(self.status_bits_group)
+
+        status_details = QtWidgets.QVBoxLayout()
+        status_details.addWidget(self.tpdo1_label)
+        status_details.addWidget(self.tpdo2_label)
+        status_details.addWidget(self.tpdo3_label)
+        status_details.addWidget(self.statusword_label)
+        status_details.addStretch(1)
+
+        status_row.addLayout(status_details)
+        layout.addLayout(status_row)
+        plot_controls = QtWidgets.QHBoxLayout()
+        plot_controls.addWidget(self.btn_reset_plot)
+        plot_controls.addWidget(self.btn_pause_plot)
+        plot_controls.addStretch(1)
+        layout.addLayout(plot_controls)
         layout.addWidget(self.plot)
 
         # Worker thread
@@ -527,6 +728,7 @@ class MainWindow(QtWidgets.QWidget):
         self.btn_disconnect.clicked.connect(self.worker.disconnect_bus)
         self.btn_start.clicked.connect(self.worker.start_motor)
         self.btn_stop.clicked.connect(self.worker.stop_motor)
+        self.btn_fault_reset.clicked.connect(self.worker.fault_reset)
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
         self.target_velocity_spin.editingFinished.connect(self._target_velocity_committed)
         self.target_torque_spin.editingFinished.connect(self._target_torque_committed)
@@ -536,13 +738,12 @@ class MainWindow(QtWidgets.QWidget):
         self.velocity_limit_spin.editingFinished.connect(self._velocity_limit_committed)
         self.cycle_time_spin.editingFinished.connect(self._cycle_committed)
         self.direction_combo.currentIndexChanged.connect(self._direction_changed)
+        self.btn_reset_plot.clicked.connect(self._reset_plot)
+        self.btn_pause_plot.clicked.connect(self._toggle_plot_pause)
         self.worker.status.connect(self.status.setText)
         self.worker.tpdo1.connect(self._on_tpdo1)
         self.worker.tpdo2.connect(self._on_tpdo2)
         self.worker.tpdo3.connect(self._on_tpdo3)
-        self.worker.frame_debug.connect(self._on_frame_debug)
-        self.worker.raw_frame.connect(self._on_raw_frame)
-        self.worker.raw_bytes.connect(self._on_raw_bytes)
 
         # Init
         self._mode_changed(0)
@@ -613,19 +814,69 @@ class MainWindow(QtWidgets.QWidget):
         self.tpdo2_label.setText(
             f"TPDO2: pos={pos_cm:.2f} cm vel={vel_cm_s:.2f} cm/s ({rpm} rpm)"
         )
+        self._last_pos_cm = pos_cm
+        self._last_vel_cm_s = vel_cm_s
+        self._append_plot()
 
     def _on_tpdo3(self, current: int, torque):
         current_a = current_raw_to_a(current)
         if torque is None:
             torque_nm = (current_a / RATED_CURRENT_A) * RATED_TORQUE_NM
-            self.tpdo3_label.setText(
-                f"TPDO3: current={current_a:.2f} A torque~{torque_nm:.2f} Nm"
-            )
+            torque_suffix = " (est)"
         else:
             torque_nm = torque_raw_to_nm(torque)
-            self.tpdo3_label.setText(
-                f"TPDO3: current={current_a:.2f} A torque={torque_nm:.2f} Nm"
-            )
+            torque_suffix = ""
+        self.tpdo3_label.setText(
+            f"TPDO3: current={current_a:.2f} A torque={torque_nm:.2f} Nm{torque_suffix}"
+        )
+        self._last_torque_mnm = torque_nm * 1000.0
+        self._append_plot()
+
+    def _append_plot(self):
+        if self._plot_paused:
+            return
+        t = time.monotonic() - self._plot_start
+        if (t - self._last_plot_t) < self._plot_interval_s:
+            return
+        self._last_plot_t = t
+        base_t = max(0.0, t - self._plot_window_s)
+        while self._t and self._t[0] < base_t:
+            self._t.popleft()
+            self._pos.popleft()
+            self._vel.popleft()
+            self._torque.popleft()
+        self._t.append(t)
+        self._pos.append(self._last_pos_cm)
+        self._vel.append(self._last_vel_cm_s)
+        self._torque.append(self._last_torque_mnm)
+        t_rel = [ti - base_t for ti in self._t]
+        self._curve_pos.setData(t_rel, list(self._pos))
+        self._curve_vel.setData(t_rel, list(self._vel))
+        self._curve_torque.setData(t_rel, list(self._torque))
+        x_max = min(self._plot_window_s, t) if t > 0 else self._plot_window_s
+        self._plot_item.setXRange(0.0, x_max, padding=0.0)
+
+    def _update_viewboxes(self):
+        self._vel_view.setGeometry(self._plot_item.vb.sceneBoundingRect())
+        self._vel_view.linkedViewChanged(self._plot_item.vb, self._vel_view.XAxis)
+        self._torque_view.setGeometry(self._plot_item.vb.sceneBoundingRect())
+        self._torque_view.linkedViewChanged(self._plot_item.vb, self._torque_view.XAxis)
+
+    def _reset_plot(self):
+        self._plot_start = time.monotonic()
+        self._last_plot_t = 0.0
+        self._t.clear()
+        self._pos.clear()
+        self._vel.clear()
+        self._torque.clear()
+        self._curve_pos.clear()
+        self._curve_vel.clear()
+        self._curve_torque.clear()
+        self._plot_item.setXRange(0.0, self._plot_window_s, padding=0.0)
+
+    def _toggle_plot_pause(self):
+        self._plot_paused = not self._plot_paused
+        self.btn_pause_plot.setText("Resume plot" if self._plot_paused else "Pause plot")
 
     def _on_frame_debug(self, can_id: int, node_id: int, dlc: int):
         self.frame_debug_label.setText(f"Last TPDO: id=0x{can_id:03X} node={node_id} dlc={dlc}")
@@ -658,11 +909,12 @@ class MainWindow(QtWidgets.QWidget):
             led.setFixedSize(12, 12)
             led.setStyleSheet("border: 1px solid #666; border-radius: 6px; background: #333;")
             text = QtWidgets.QLabel(f"b{bit}: {label}")
+            text.setFixedWidth(180)
             grid.addWidget(led, row, 0)
             grid.addWidget(text, row, 1)
             self._status_leds[bit] = led
 
-        grid.setColumnStretch(2, 1)
+        grid.setColumnStretch(2, 0)
         return group
 
     def _update_status_bits(self, statusword: int):
