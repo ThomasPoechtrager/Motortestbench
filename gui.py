@@ -7,8 +7,7 @@ from PySide6 import QtCore, QtWidgets
 import pyqtgraph as pg
 
 from config import (
-    MODE_POSITION, MODE_TORQUE, MODE_VELOCITY,
-    TORQUE_SLOPE_SCALE
+    MODE_POSITION, MODE_TORQUE, MODE_VELOCITY
 )
 from drive_data import DriveState
 from m56s_drive_ctrl import DriveController
@@ -32,9 +31,9 @@ class MainWindow(QtWidgets.QWidget):
         self.target_velocity_spin.setValue(1000)
         self.target_velocity_spin.setKeyboardTracking(False)
 
-        self.target_torque_label = QtWidgets.QLabel("Target torque (mNm)")
+        self.target_torque_label = QtWidgets.QLabel("Target load (kg)")
         self.target_torque_spin = QtWidgets.QSpinBox()
-        self.target_torque_spin.setRange(-10000, 10000)
+        self.target_torque_spin.setRange(0, 100)
         self.target_torque_spin.setValue(0)
         self.target_torque_spin.setKeyboardTracking(False)
 
@@ -54,7 +53,7 @@ class MainWindow(QtWidgets.QWidget):
 
         self.torque_slope_spin = QtWidgets.QSpinBox()
         self.torque_slope_spin.setRange(0, 1_000_000)
-        self.torque_slope_spin.setValue(5000)
+        self.torque_slope_spin.setValue(50)
 
         self.velocity_limit_spin = QtWidgets.QSpinBox()
         self.velocity_limit_spin.setRange(0, 10000)
@@ -80,6 +79,7 @@ class MainWindow(QtWidgets.QWidget):
         self.tpdo1_label = QtWidgets.QLabel("TPDO1: status=0x---- err=0x---- mode=--")
         self.tpdo2_label = QtWidgets.QLabel("TPDO2: pos=0 vel=0 rpm")
         self.tpdo3_label = QtWidgets.QLabel("TPDO3: current=0 torque=0")
+        self.tpdo4_label = QtWidgets.QLabel("DC Bus: 0.0V (max: 0.0V) | Temps: Drive=0°C Chassis=0°C")
         self.statusword_label = QtWidgets.QLabel("Statusword: 0x----")
         self.status_bits_group = self._build_status_bits()
 
@@ -168,6 +168,7 @@ class MainWindow(QtWidgets.QWidget):
         status_details.addWidget(self.tpdo1_label)
         status_details.addWidget(self.tpdo2_label)
         status_details.addWidget(self.tpdo3_label)
+        status_details.addWidget(self.tpdo4_label)
         status_details.addWidget(self.statusword_label)
         status_details.addStretch(1)
 
@@ -245,7 +246,9 @@ class MainWindow(QtWidgets.QWidget):
 
     def _target_torque_committed(self):
         self.target_torque_spin.interpretText()
-        self.state.update_command(target_torque_mnm=self.target_torque_spin.value())
+        # Store as mkg (kg × 1000) for precision in integer field
+        kg_value = self.target_torque_spin.value()
+        self.state.update_command(target_torque_mnm=kg_value * 1000)
 
 
     def _target_position_committed(self):
@@ -261,7 +264,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _torque_slope_committed(self):
         self.torque_slope_spin.interpretText()
-        self.state.update_command(torque_slope=self.torque_slope_spin.value() // TORQUE_SLOPE_SCALE)
+        self.state.update_command(torque_slope=self.torque_slope_spin.value())
 
     def _velocity_limit_committed(self):
         self.velocity_limit_spin.interpretText()
@@ -286,6 +289,10 @@ class MainWindow(QtWidgets.QWidget):
         torque_nm = fb.torque_mnm / 1000.0
         self.tpdo3_label.setText(
             f"TPDO3: current={fb.current_a:.2f} A torque={torque_nm:.2f} Nm"
+        )
+        
+        self.tpdo4_label.setText(
+            f"DC Bus: {fb.dc_bus_voltage:.1f}V (max: {fb.dc_bus_voltage_max:.1f}V) | Temps: Drive={fb.drive_temperature:.1f}°C Chassis={fb.chassis_temperature:.1f}°C"
         )
 
         self._last_pos_cm = fb.position_cm
@@ -345,11 +352,9 @@ class MainWindow(QtWidgets.QWidget):
         self.state.update_flags(request_connect=True)
 
     def _on_disconnect_clicked(self):
-        if self.worker_thread.isRunning():
-            self.state.update_flags(request_disconnect=True)
-            QtCore.QThread.msleep(100)
-            self.worker_thread.quit()
-            self.worker_thread.wait(500)
+        self.state.update_flags(request_disconnect=True)
+        # Don't stop the thread, just disconnect
+        # The polling thread keeps running for faster reconnection
 
     def _on_start_clicked(self):
         self.state.update_flags(request_start=True)

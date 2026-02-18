@@ -1,6 +1,6 @@
 from config import (
 	RPM_TO_RAW, INC_PER_REV, GEAR_RATIO, CM_PER_SHAFT_REV,
-	RATED_TORQUE_NM, RATED_CURRENT_A,
+	RATED_TORQUE_NM, RATED_CURRENT_A, SHAFT_RADIUS_CM,
 	CURRENT_ACTUAL_PCT_PER_LSB, TORQUE_PCT_PER_LSB
 )
 
@@ -30,3 +30,19 @@ def torque_raw_to_nm(torque_raw: int) -> float:
 
 def current_raw_to_a(current_raw: int) -> float:
     return (current_raw * (CURRENT_ACTUAL_PCT_PER_LSB / 100)) * RATED_CURRENT_A
+
+def kg_to_motor_torque_nm(kg: float) -> float:
+    """
+    Convert kg load to motor torque in Nm.
+    kg → Force (N) → Shaft Torque (Nm) → Motor Torque (Nm)
+    
+    Formula:
+    - Force = kg × 9.81 N
+    - Shaft Torque = Force × Shaft Radius (m)
+    - Motor Torque = Shaft Torque / Gear Ratio
+    """
+    force_n = kg * 9.81  # Convert kg to force in Newton
+    shaft_radius_m = SHAFT_RADIUS_CM / 100.0  # Convert cm to m
+    shaft_torque_nm = force_n * shaft_radius_m  # Torque at shaft
+    motor_torque_nm = shaft_torque_nm / GEAR_RATIO  # Torque at motor (motor is faster, less torque)
+    return motor_torque_nm

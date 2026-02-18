@@ -9,12 +9,12 @@ from config import MODE_TORQUE
 class DriveCommand:
     mode: int = MODE_TORQUE
     target_velocity_rpm: int = 0
-    target_torque_mnm: int = 0
+    target_torque_mnm: int = 0  # stored as mkg (kg × 1000) for precision
     target_position_cm: int = 0
     profile_velocity_rpm: int = 500
     direction: int = -1
     cycle_time_ms: int = 20
-    torque_slope: int = 5000
+    torque_slope: int = 50
     velocity_limit_rpm: int = 60
 
 
@@ -25,6 +25,10 @@ class DriveFeedback:
     speed_rpm: float = 0.0
     torque_mnm: float = 0.0
     current_a: float = 0.0
+    dc_bus_voltage: float = 0.0
+    dc_bus_voltage_max: float = 0.0
+    drive_temperature: float = 0.0
+    chassis_temperature: float = 0.0
     statusword: int = 0
     error_code: int = 0
     mode_display: int = 0

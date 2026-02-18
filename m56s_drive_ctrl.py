@@ -9,12 +9,13 @@ from config import (
     MODE_POSITION, MODE_TORQUE, MODE_VELOCITY,
     PROFILE_ACCEL_DEFAULT, PROFILE_DECEL_DEFAULT, QUICK_STOP_DECEL_DEFAULT,
     MAX_PROFILE_VELOCITY_DEFAULT,
-    TORQUE_INPUT_SCALE, POLL_INTERVAL_MS, TX_INTERVAL_MS
+    POLL_INTERVAL_MS, TX_INTERVAL_MS
 )
 from scale import (
     rpm_to_raw, rpm_to_pulses_per_sec, cm_to_counts,
     torque_nm_to_raw, torque_raw_to_nm, current_raw_to_a,
     counts_to_cm, inc_per_sec_to_cm_s, inc_per_sec_to_rpm,
+    kg_to_motor_torque_nm,
     RATED_CURRENT_A, RATED_TORQUE_NM
 )
 from drive_data import DriveState
@@ -116,6 +117,9 @@ def nmt_send(ser, command, node_id):
     send_can(ser, COB_NMT, bytes([command, node_id]))
 
 
+
+
+
 def rpdo1_send(ser, controlword, mode, target_torque):
     data = bytearray(8)
     data[0:2] = int(controlword).to_bytes(2, "little", signed=False)
@@ -166,6 +170,11 @@ class DriveController(QtCore.QObject):
         self._last_torque_slope = None
         self._last_velocity_limit_raw = None
         self._last_mode = None
+        self._reinitializing = False
+        self._last_heartbeat_state = None
+        self._heartbeat_timeout_counter = 0
+        self._heartbeat_timeout_limit = 300  # 300 * 5ms = 1.5 seconds
+        self._last_fault_state = False
 
     def _ensure_timers(self):
         if self._timer is None:
@@ -185,22 +194,11 @@ class DriveController(QtCore.QObject):
             self._timer.start()
             self.status.emit("Polling started")
 
-    @QtCore.Slot()
-    def connect_bus(self):
+    def _initialize_node(self):
+        """Initialize node (call after connection or after boot-up detected)"""
+        if not self.ser:
+            return
         try:
-            self.ser = serial.Serial(COM_PORT, SERIAL_BAUD, timeout=0.05)
-            cfg = build_config_cmd_fixed20(
-                can_bitrate_code=CAN_BITRATE_CODE,
-                frame_type=0x01,
-                filter_id=0x00000000,
-                mask_id=0x00000000,
-                can_mode=0x00,
-                auto_retx=0x00
-            )
-            self.ser.reset_input_buffer()
-            self.ser.write(cfg)
-            self.ser.flush()
-
             # Heartbeat producer time: 1000 ms
             sdo_write_u16(self.ser, 0x1017, 0x00, 1000)
 
@@ -228,30 +226,129 @@ class DriveController(QtCore.QObject):
             self._last_torque_slope = cmd.torque_slope
             self._last_velocity_limit_raw = velocity_limit_raw
             self._last_mode = cmd.mode
+        except (serial.SerialException, OSError, ValueError) as e:
+            self.status.emit(f"Initialization error: {e}")
+
+    @QtCore.Slot()
+    def connect_bus(self):
+        try:
+            # Close any existing connection first
+            if self.ser:
+                try:
+                    self.ser.close()
+                except (serial.SerialException, OSError):
+                    pass
+                self.ser = None
+                QtCore.QThread.msleep(100)  # Wait for port to fully close
+            
+            self.ser = serial.Serial(COM_PORT, SERIAL_BAUD, timeout=0.05)
+            QtCore.QThread.msleep(50)  # Wait for port to stabilize
+            
+            # Clear any garbage in buffer
+            self.ser.reset_input_buffer()
+            self.ser.reset_output_buffer()
+            self._rx_buf.clear()
+            
+            cfg = build_config_cmd_fixed20(
+                can_bitrate_code=CAN_BITRATE_CODE,
+                frame_type=0x01,
+                filter_id=0x00000000,
+                mask_id=0x00000000,
+                can_mode=0x00,
+                auto_retx=0x00
+            )
+            self.ser.write(cfg)
+            self.ser.flush()
+            QtCore.QThread.msleep(50)
+
+            self._initialize_node()
+            
+            # SAFETY: Send shutdown sequence after reconnect to ensure motor is stopped
+            # (it may have been running when connection was lost)
+            QtCore.QThread.msleep(100)
+            rpdo1_send(self.ser, CW_SHUTDOWN, MODE_VELOCITY, target_torque=0)
+            QtCore.QThread.msleep(20)
+            rpdo1_send(self.ser, CW_DISABLE_VOLTAGE, MODE_VELOCITY, target_torque=0)
+            QtCore.QThread.msleep(100)
+            self.running = False  # Explicitly set to false after disconnect
+            self._state.update_flags(running=False)
+            self.status.emit("Motor stopped for safety")
+
+            # Reset DC Bus Voltage max
+            self._state.update_feedback(dc_bus_voltage_max=0.0)
+            
+            # Reset heartbeat timeout counter
+            self._heartbeat_timeout_counter = 0
+            self._last_fault_state = False
+
+            # Ensure poll timer is running
+            self._ensure_timers()
+            if self._timer and not self._timer.isActive():
+                self._timer.start()
+                self.status.emit("Polling timer started")
+            
+            # Start TX timer for cyclic command sending
+            if self._tx_timer and not self._tx_timer.isActive():
+                self._tx_timer.setInterval(self.tx_interval_ms)
+                self._tx_timer.start()
+                self.status.emit("TX timer started")
 
             self._state.update_flags(connected=True)
             self.status.emit("Connected")
         except (serial.SerialException, OSError, ValueError) as e:
+            self.ser = None
             self.status.emit(f"Connect error: {e}")
+
+    def _emergency_disconnect(self):
+        """Force emergency disconnect without sending commands (used when connection is broken)"""
+        try:
+            if self.ser:
+                try:
+                    self.ser.reset_input_buffer()
+                    self.ser.reset_output_buffer()
+                    self._rx_buf.clear()
+                except (serial.SerialException, OSError):
+                    pass
+                try:
+                    self.ser.close()
+                except (serial.SerialException, OSError):
+                    pass
+        finally:
+            self.ser = None
+            self.running = False
+            self._state.update_flags(connected=False, running=False)
 
     @QtCore.Slot()
     def disconnect_bus(self):
-        if self._tx_timer:
+        # Stop timers first
+        if self._timer and self._timer.isActive():
+            self._timer.stop()
+        if self._tx_timer and self._tx_timer.isActive():
             self._tx_timer.stop()
-        if self.ser:
-            rpdo3_send(self.ser, target_velocity=0, target_position=0)
-            rpdo1_send(self.ser, CW_SHUTDOWN, MODE_VELOCITY, target_torque=0)
-            QtCore.QThread.msleep(20)
-            rpdo1_send(self.ser, CW_DISABLE_VOLTAGE, MODE_VELOCITY, target_torque=0)
-            QtCore.QThread.msleep(150)
+            
         if self.ser:
             try:
+                # Try to send shutdown sequence, but don't fail if connection is broken
+                rpdo3_send(self.ser, target_velocity=0, target_position=0)
+                rpdo1_send(self.ser, CW_SHUTDOWN, MODE_VELOCITY, target_torque=0)
+                QtCore.QThread.msleep(20)
+                rpdo1_send(self.ser, CW_DISABLE_VOLTAGE, MODE_VELOCITY, target_torque=0)
+                QtCore.QThread.msleep(150)
+            except (serial.SerialException, OSError):
+                # Connection already broken, that's ok
+                pass
+            
+            try:
+                # Clear buffers before closing
+                self.ser.reset_input_buffer()
+                self.ser.reset_output_buffer()
+                self._rx_buf.clear()
                 self.ser.close()
             except (serial.SerialException, OSError):
                 pass
-            self.ser = None
-        if self._tx_timer:
-            self._tx_timer.stop()
+            finally:
+                self.ser = None
+        
         self.running = False
         self._state.update_flags(connected=False, running=False)
         self.status.emit("Disconnected")
@@ -263,25 +360,47 @@ class DriveController(QtCore.QObject):
             return
         self._ensure_timers()
         cmd = self._state.snapshot().command
-        rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0)
-        QtCore.QThread.msleep(20)
-        rpdo1_send(self.ser, CW_SWITCH_ON, cmd.mode, target_torque=0)
-        QtCore.QThread.msleep(20)
-        rpdo1_send(self.ser, CW_ENABLE_OPERATION, cmd.mode, target_torque=0)
-        if self._tx_timer:
-            self._tx_timer.setInterval(self.tx_interval_ms)
-        self.running = True
-        self._state.update_flags(running=True)
-        if self._tx_timer:
-            self._tx_timer.start()
-        self.status.emit("Started")
+        
+        # Proper CiA402 startup sequence with adequate delays
+        # The drive needs time to process each state transition
+        try:
+            self.status.emit("Starting motor...")
+            
+            # State 1: Shutdown -> Ready to Switch On
+            rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0)
+            QtCore.QThread.msleep(30)
+            
+            # State 2: Shutdown -> Ready to Switch On
+            rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0)
+            QtCore.QThread.msleep(30)
+            
+            # State 3: Switch On Disabled -> Ready to Switch On
+            rpdo1_send(self.ser, CW_SWITCH_ON, cmd.mode, target_torque=0)
+            QtCore.QThread.msleep(30)
+            
+            # State 4: Ready to Switch On -> Switched On
+            rpdo1_send(self.ser, CW_SWITCH_ON, cmd.mode, target_torque=0)
+            QtCore.QThread.msleep(30)
+            
+            # State 5: Switched On -> Operation Enabled
+            rpdo1_send(self.ser, CW_ENABLE_OPERATION, cmd.mode, target_torque=0)
+            QtCore.QThread.msleep(50)
+            
+            # TX timer is already running, just update interval for cyclic sending
+            self.tx_interval_ms = cmd.cycle_time_ms
+            if self._tx_timer:
+                self._tx_timer.setInterval(self.tx_interval_ms)
+            
+            self.running = True
+            self._state.update_flags(running=True)
+            self.status.emit("Started")
+        except (serial.SerialException, OSError) as e:
+            self.status.emit(f"Start error: {e}")
 
     @QtCore.Slot()
     def stop_motor(self):
         if not self.ser:
             return
-        if self._tx_timer:
-            self._tx_timer.stop()
         self._send_disable_sequence()
         self.running = False
         self._state.update_flags(running=False)
@@ -292,12 +411,20 @@ class DriveController(QtCore.QObject):
         if not self.ser:
             self.status.emit("Not connected")
             return
+        
+        # Important: Stop motor and clear running flag before resetting fault
+        # This prevents the motor from running away after fault reset
+        if self.running:
+            self.running = False
+            self._state.update_flags(running=False)
+        
         cw = CW_SHUTDOWN | 0x0080
         cmd = self._state.snapshot().command
         rpdo1_send(self.ser, cw, cmd.mode, target_torque=0)
         QtCore.QThread.msleep(20)
         rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0)
-        self.status.emit("Fault reset sent")
+        self._state.update_flags(fault=False)
+        self.status.emit("Fault reset - Motor stopped for safety. Press Start to resume.")
 
     def _sync_cycle_time(self, cycle_time_ms: int):
         cycle_time_ms = max(1, int(cycle_time_ms))
@@ -307,75 +434,85 @@ class DriveController(QtCore.QObject):
                 self._tx_timer.setInterval(self.tx_interval_ms)
 
     def _send_disable_sequence(self):
-        cw = CW_ENABLE_OPERATION | CW_HALT_BIT
-        rpdo1_send(self.ser, cw, MODE_VELOCITY, target_torque=0)
-        rpdo3_send(self.ser, target_velocity=0, target_position=0)
-        QtCore.QThread.msleep(20)
+        # Proper shutdown sequence: Shutdown -> Disable Voltage
         rpdo1_send(self.ser, CW_SHUTDOWN, MODE_VELOCITY, target_torque=0)
+        rpdo3_send(self.ser, target_velocity=0, target_position=0)
         QtCore.QThread.msleep(20)
         rpdo1_send(self.ser, CW_DISABLE_VOLTAGE, MODE_VELOCITY, target_torque=0)
 
     def _send_cyclic(self):
-        if not self.ser or not self.running:
+        if not self.ser:
             return
 
         snapshot = self._state.snapshot()
         cmd = snapshot.command
-        self._sync_cycle_time(cmd.cycle_time_ms)
+        
+        if self.running:
+            # Motor running: send full control commands
+            self._sync_cycle_time(cmd.cycle_time_ms)
 
-        if self._last_mode != cmd.mode:
-            sdo_write_u8(self.ser, 0x6060, 0x00, int(cmd.mode))
-            self._last_mode = cmd.mode
+            if self._last_mode != cmd.mode:
+                sdo_write_u8(self.ser, 0x6060, 0x00, int(cmd.mode))
+                self._last_mode = cmd.mode
 
-        direction = 1 if int(cmd.direction) >= 0 else -1
-        target_velocity = rpm_to_raw(cmd.target_velocity_rpm) * direction
-        torque_nm = float(cmd.target_torque_mnm) / TORQUE_INPUT_SCALE
-        target_torque = torque_nm_to_raw(torque_nm) * direction
-        target_position = cm_to_counts(cmd.target_position_cm)
-        profile_velocity = rpm_to_pulses_per_sec(cmd.profile_velocity_rpm)
+            direction = 1 if int(cmd.direction) >= 0 else -1
+            target_velocity = rpm_to_raw(cmd.target_velocity_rpm) * direction
+            # Convert kg to motor torque in Nm
+            torque_nm = kg_to_motor_torque_nm(float(cmd.target_torque_mnm) / 1000.0)
+            target_torque = torque_nm_to_raw(torque_nm) * direction
+            target_position = cm_to_counts(cmd.target_position_cm)
+            profile_velocity = rpm_to_pulses_per_sec(cmd.profile_velocity_rpm)
 
-        if cmd.target_position_cm != self._last_target_position:
-            self._pp_setpoint_pending = True
-            self._pp_ack_timeout = 50
-            self._last_target_position = cmd.target_position_cm
+            if cmd.target_position_cm != self._last_target_position:
+                self._pp_setpoint_pending = True
+                self._pp_ack_timeout = 50
+                self._last_target_position = cmd.target_position_cm
 
-        velocity_limit_raw = rpm_to_raw(cmd.velocity_limit_rpm)
-        if (cmd.torque_slope != self._last_torque_slope or
-                velocity_limit_raw != self._last_velocity_limit_raw):
-            rpdo2_send(self.ser, cmd.torque_slope, velocity_limit_raw)
-            self._last_torque_slope = cmd.torque_slope
-            self._last_velocity_limit_raw = velocity_limit_raw
+            velocity_limit_raw = rpm_to_raw(cmd.velocity_limit_rpm)
+            if (cmd.torque_slope != self._last_torque_slope or
+                    velocity_limit_raw != self._last_velocity_limit_raw):
+                rpdo2_send(self.ser, cmd.torque_slope, velocity_limit_raw)
+                self._last_torque_slope = cmd.torque_slope
+                self._last_velocity_limit_raw = velocity_limit_raw
 
-        cw = CW_ENABLE_OPERATION
-        if cmd.mode == MODE_VELOCITY:
-            rpdo1_send(self.ser, cw, MODE_VELOCITY, target_torque=0)
-            rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position)
-        elif cmd.mode == MODE_POSITION:
-            if self._pp_wait_ack and self._pp_ack_timeout > 0:
-                self._pp_ack_timeout -= 1
-                if self._pp_ack_timeout == 0:
-                    self._pp_wait_ack = False
-                    self.status.emit("PP ack timeout, retrying setpoint")
-            if self._pp_setpoint_pending and not self._pp_wait_ack:
-                self._pp_setpoint_delay = 1
-                self._pp_setpoint_pulse = 2
-                self._pp_setpoint_pending = False
-                self._pp_wait_ack = True
+            cw = CW_ENABLE_OPERATION
+            if cmd.mode == MODE_VELOCITY:
+                rpdo1_send(self.ser, cw, MODE_VELOCITY, target_torque=0)
+                rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position)
+            elif cmd.mode == MODE_POSITION:
+                if self._pp_wait_ack and self._pp_ack_timeout > 0:
+                    self._pp_ack_timeout -= 1
+                    if self._pp_ack_timeout == 0:
+                        self._pp_wait_ack = False
+                        self.status.emit("PP ack timeout, retrying setpoint")
+                if self._pp_setpoint_pending and not self._pp_wait_ack:
+                    self._pp_setpoint_delay = 1
+                    self._pp_setpoint_pulse = 2
+                    self._pp_setpoint_pending = False
+                    self._pp_wait_ack = True
 
-            cw |= 0x0020
-            cw &= ~0x0040
-            if self._pp_setpoint_delay > 0:
-                self._pp_setpoint_delay -= 1
-            elif self._pp_setpoint_pulse > 0:
-                cw |= 0x0010
-                cw |= 0x0200
-                self._pp_setpoint_pulse -= 1
-            rpdo1_send(self.ser, cw, MODE_POSITION, target_torque=0)
-            rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position)
-            rpdo4_send(self.ser, profile_velocity=profile_velocity)
+                cw |= 0x0020
+                cw &= ~0x0040
+                if self._pp_setpoint_delay > 0:
+                    self._pp_setpoint_delay -= 1
+                elif self._pp_setpoint_pulse > 0:
+                    cw |= 0x0010
+                    cw |= 0x0200
+                    self._pp_setpoint_pulse -= 1
+                rpdo1_send(self.ser, cw, MODE_POSITION, target_torque=0)
+                rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position)
+                rpdo4_send(self.ser, profile_velocity=profile_velocity)
+            else:
+                rpdo1_send(self.ser, cw, MODE_TORQUE, target_torque=target_torque)
+                rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position)
         else:
-            rpdo1_send(self.ser, cw, MODE_TORQUE, target_torque=target_torque)
-            rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position)
+            # Motor not running: send safe state RPDOs (CW_SHUTDOWN, zero targets)
+            # This keeps the drive responsive and prevents it from auto-stopping
+            try:
+                rpdo1_send(self.ser, CW_SHUTDOWN, MODE_VELOCITY, target_torque=0)
+                rpdo3_send(self.ser, target_velocity=0, target_position=0)
+            except (serial.SerialException, OSError):
+                pass
 
     def _poll(self):
         # Check request flags first
@@ -404,9 +541,33 @@ class DriveController(QtCore.QObject):
 
         if not self.ser:
             return
-        pending = self.ser.in_waiting
+            
+        # Heartbeat timeout monitoring
+        self._heartbeat_timeout_counter += 1
+        if self._heartbeat_timeout_counter > self._heartbeat_timeout_limit:
+            if flags.connected:
+                self.status.emit("ERROR: CAN communication lost! Disconnecting for safety.")
+                # Use emergency disconnect (no commands, just cleanup)
+                self._emergency_disconnect()
+                return
+            
+        try:
+            pending = self.ser.in_waiting
+        except (serial.SerialException, OSError):
+            # Connection lost, do emergency disconnect
+            if flags.connected:
+                self.status.emit("ERROR: Serial connection lost! Disconnecting for safety.")
+                self._emergency_disconnect()
+            return
         if pending:
-            chunk = self.ser.read(pending)
+            try:
+                chunk = self.ser.read(pending)
+            except (serial.SerialException, OSError):
+                # Connection lost during read
+                if flags.connected:
+                    self.status.emit("ERROR: Serial read error! Disconnecting for safety.")
+                    self._emergency_disconnect()
+                return
             if chunk:
                 self._rx_buf.extend(chunk)
 
@@ -456,14 +617,73 @@ class DriveController(QtCore.QObject):
                 if node_id == NODE_ID:
                     state = data[0]
                     self.status.emit(f"HB state=0x{state:02X}")
+                    
+                    # Reset heartbeat timeout counter on valid heartbeat
+                    self._heartbeat_timeout_counter = 0
+                    
+                    # Handle unexpected non-operational states:
+                    # 0x00 = Boot-up, 0x7F = Pre-Operational
+                    # Expected: 0x05 = Operational
+                    flags = self._state.snapshot().flags
+                    
+                    # Detect if controller needs re-initialization
+                    needs_reinit = False
+                    if state == 0x00:
+                        # Boot-up detected
+                        needs_reinit = True
+                    elif state == 0x7F and flags.connected:
+                        # Pre-Operational when we expect Operational
+                        # Only reinit if we had a previous operational state
+                        if self._last_heartbeat_state == 0x05 or self._last_heartbeat_state is None:
+                            needs_reinit = True
+                    
+                    if needs_reinit and not self._reinitializing and flags.connected:
+                        self._reinitializing = True
+                        if state == 0x00:
+                            self.status.emit("Controller boot-up detected - initializing...")
+                        else:
+                            self.status.emit("Controller in Pre-Op - switching to Operational...")
+                        
+                        QtCore.QThread.msleep(100)
+                        self._initialize_node()
+                        
+                        # Restart motor if it was running
+                        if flags.running:
+                            QtCore.QThread.msleep(100)
+                            cmd = self._state.snapshot().command
+                            rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0)
+                            QtCore.QThread.msleep(20)
+                            rpdo1_send(self.ser, CW_SWITCH_ON, cmd.mode, target_torque=0)
+                            QtCore.QThread.msleep(20)
+                            rpdo1_send(self.ser, CW_ENABLE_OPERATION, cmd.mode, target_torque=0)
+                            self.status.emit("Motor restarted - now Operational")
+                        else:
+                            self.status.emit("Controller switched to Operational")
+                        self._reinitializing = False
+                    
+                    self._last_heartbeat_state = state
             elif 0x180 <= can_id <= 0x1FF and dlc >= 5:
                 node_id = can_id - 0x180
                 if node_id == NODE_ID:
+                    # Reset heartbeat timeout on TPDO1
+                    self._heartbeat_timeout_counter = 0
+                    
                     statusword, error_code, mode_disp = struct.unpack_from("<HHB", data, 0)
                     if statusword & 0x1000:
                         self._pp_wait_ack = False
                     fault = bool(statusword & (1 << 3))
                     target_reached = bool(statusword & (1 << 10))
+                    
+                    # Safety: Auto-stop on fault detection
+                    if fault and not self._last_fault_state:
+                        # Fault just occurred
+                        if self.running:
+                            self.running = False
+                            self._state.update_flags(running=False)
+                            self.status.emit(f"FAULT DETECTED (Error: 0x{error_code:04X})! Motor stopped for safety.")
+                    
+                    self._last_fault_state = fault
+                    
                     self._state.update_feedback(
                         statusword=statusword,
                         error_code=error_code,
@@ -474,6 +694,9 @@ class DriveController(QtCore.QObject):
             elif 0x280 <= can_id <= 0x2FF and dlc >= 8:
                 node_id = can_id - 0x280
                 if node_id == NODE_ID:
+                    # Reset heartbeat timeout on TPDO2
+                    self._heartbeat_timeout_counter = 0
+                    
                     position, velocity = struct.unpack_from("<ii", data, 0)
                     pos_cm = counts_to_cm(position)
                     vel_cm_s = inc_per_sec_to_cm_s(velocity)
@@ -487,20 +710,71 @@ class DriveController(QtCore.QObject):
             elif 0x380 <= can_id <= 0x3FF and dlc >= 2:
                 node_id = can_id - 0x380
                 if node_id == NODE_ID:
+                    # Reset heartbeat timeout on TPDO3
+                    self._heartbeat_timeout_counter = 0
+                    
+                    # Current actual value (0x6078) at bytes 0-1
                     current = struct.unpack_from("<h", data, 0)[0]
                     torque = None
+                    dc_bus_voltage = 0.0
+                    drive_temp = 0
+                    chassis_temp = 0
+                    
+                    # Check if torque is present (backward compatibility)
+                    # or if new format with DC Bus Voltage
                     if dlc >= 4:
-                        torque = struct.unpack_from("<h", data, 2)[0]
-                        self._last_torque = torque
+                        # Could be torque or DC Bus Voltage
+                        value_at_2 = struct.unpack_from("<H", data, 2)[0]
+                        
+                        # DC Bus Voltage (0x2030) should be > 100 (10V) typically
+                        # Torque values are typically smaller
+                        if dlc >= 8:
+                            # Extended format with all values
+                            # Bytes 0-1: Current
+                            # Bytes 2-3: DC Bus Voltage  
+                            # Bytes 4-5: Chassis Temperature (0x2019:02)
+                            # Bytes 6-7: Drive Temperature (0x2019:01)
+                            dc_bus_voltage = value_at_2 / 10.0  # Convert to V
+                            chassis_temp_raw = struct.unpack_from("<h", data, 4)[0]
+                            drive_temp_raw = struct.unpack_from("<h", data, 6)[0]
+                            # Convert from 0.1°C to °C
+                            chassis_temp = chassis_temp_raw / 10.0
+                            drive_temp = drive_temp_raw / 10.0
+                            # Estimate torque from current
+                            torque = None
+                        else:
+                            # Old format with torque
+                            torque = struct.unpack_from("<h", data, 2)[0]
+                            self._last_torque = torque
+                            
+                            # Try to read additional data if present
+                            if dlc >= 6:
+                                dc_bus_raw = struct.unpack_from("<H", data, 4)[0]
+                                dc_bus_voltage = dc_bus_raw / 10.0
+                            if dlc >= 8:
+                                drive_temp_raw = struct.unpack_from("<h", data, 6)[0]
+                                drive_temp = drive_temp_raw / 10.0
                     else:
                         torque = self._last_torque
+                    
                     current_a = current_raw_to_a(current)
                     if torque is None:
                         torque_nm = (current_a / RATED_CURRENT_A) * RATED_TORQUE_NM
                     else:
                         torque_nm = torque_raw_to_nm(torque)
+                    # Always use absolute value for torque display
+                    torque_nm = abs(torque_nm)
+                    
+                    # Update max DC Bus Voltage
+                    snapshot = self._state.snapshot()
+                    dc_bus_voltage_max = max(snapshot.feedback.dc_bus_voltage_max, dc_bus_voltage)
+                    
                     self._state.update_feedback(
                         current_a=current_a,
                         torque_mnm=torque_nm * 1000.0,
+                        dc_bus_voltage=dc_bus_voltage,
+                        dc_bus_voltage_max=dc_bus_voltage_max,
+                        drive_temperature=drive_temp,
+                        chassis_temperature=chassis_temp,
                         last_tpdo=can_id
                     )
