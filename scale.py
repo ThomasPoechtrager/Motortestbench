@@ -1,4 +1,4 @@
-from config import (
+﻿from config import (
 	RPM_TO_RAW, INC_PER_REV, GEAR_RATIO, CM_PER_SHAFT_REV,
 	RATED_TORQUE_NM, RATED_CURRENT_A, SHAFT_RADIUS_CM,
 	CURRENT_ACTUAL_PCT_PER_LSB, TORQUE_PCT_PER_LSB
@@ -25,20 +25,17 @@ def cm_to_counts(cm: float) -> int:
 def torque_nm_to_raw(torque_nm: float) -> int:
     return int(round((torque_nm / RATED_TORQUE_NM) * (100 / TORQUE_PCT_PER_LSB)))
 
-def torque_raw_to_nm(torque_raw: int) -> float:
-    return (torque_raw * (TORQUE_PCT_PER_LSB / 100)) * RATED_TORQUE_NM
-
 def current_raw_to_a(current_raw: int) -> float:
     return (current_raw * (CURRENT_ACTUAL_PCT_PER_LSB / 100)) * RATED_CURRENT_A
 
 def kg_to_motor_torque_nm(kg: float) -> float:
     """
     Convert kg load to motor torque in Nm.
-    kg → Force (N) → Shaft Torque (Nm) → Motor Torque (Nm)
-    
+    kg â†’ Force (N) â†’ Shaft Torque (Nm) â†’ Motor Torque (Nm)
+
     Formula:
-    - Force = kg × 9.81 N
-    - Shaft Torque = Force × Shaft Radius (m)
+    - Force = kg Ã— 9.81 N
+    - Shaft Torque = Force Ã— Shaft Radius (m)
     - Motor Torque = Shaft Torque / Gear Ratio
     """
     force_n = kg * 9.81  # Convert kg to force in Newton

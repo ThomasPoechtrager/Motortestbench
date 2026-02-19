@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+﻿from dataclasses import dataclass, field
 from threading import Lock
 from typing import Optional
 
@@ -9,7 +9,7 @@ from config import MODE_TORQUE
 class DriveCommand:
     mode: int = MODE_TORQUE
     target_velocity_rpm: int = 0
-    target_torque_mnm: int = 0  # stored as mkg (kg × 1000) for precision
+    target_torque_mnm: int = 0  # stored as mkg (kg Ã— 1000) for precision
     target_position_cm: int = 0
     profile_velocity_rpm: int = 500
     direction: int = -1

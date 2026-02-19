@@ -1,4 +1,4 @@
-import sys
+﻿import sys
 import time
 from collections import deque
 from typing import Any, cast
@@ -79,7 +79,9 @@ class MainWindow(QtWidgets.QWidget):
         self.tpdo1_label = QtWidgets.QLabel("TPDO1: status=0x---- err=0x---- mode=--")
         self.tpdo2_label = QtWidgets.QLabel("TPDO2: pos=0 vel=0 rpm")
         self.tpdo3_label = QtWidgets.QLabel("TPDO3: current=0 torque=0")
-        self.tpdo4_label = QtWidgets.QLabel("DC Bus: 0.0V (max: 0.0V) | Temps: Drive=0°C Chassis=0°C")
+        self.tpdo4_label = QtWidgets.QLabel(
+            "DC Bus: 0.0V (max: 0.0V) | Temps: Drive=0Â°C Chassis=0Â°C"
+        )
         self.statusword_label = QtWidgets.QLabel("Statusword: 0x----")
         self.status_bits_group = self._build_status_bits()
 
@@ -246,7 +248,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _target_torque_committed(self):
         self.target_torque_spin.interpretText()
-        # Store as mkg (kg × 1000) for precision in integer field
+        # Store as mkg (kg Ã— 1000) for precision in integer field
         kg_value = self.target_torque_spin.value()
         self.state.update_command(target_torque_mnm=kg_value * 1000)
 
@@ -292,7 +294,8 @@ class MainWindow(QtWidgets.QWidget):
         )
         
         self.tpdo4_label.setText(
-            f"DC Bus: {fb.dc_bus_voltage:.1f}V (max: {fb.dc_bus_voltage_max:.1f}V) | Temps: Drive={fb.drive_temperature:.1f}°C Chassis={fb.chassis_temperature:.1f}°C"
+            f"DC Bus: {fb.dc_bus_voltage:.1f}V (max: {fb.dc_bus_voltage_max:.1f}V) | "
+            f"Temps: Drive={fb.drive_temperature:.1f}Â°C Chassis={fb.chassis_temperature:.1f}Â°C"
         )
 
         self._last_pos_cm = fb.position_cm

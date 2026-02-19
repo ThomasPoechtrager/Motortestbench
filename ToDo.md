@@ -2,7 +2,8 @@
 
 
 # Motortestbench
-- communication loss shutdown von Servo Seite aus
+- Änderungen nach Rückmeldung von Moons einarbeiten - Torque berechnung und Watchdog
+- Limit Konstanten nicht im Raw Wert sondern im Metrischen Werten
 
 ## Done
 - Motor control with Start/Stop
@@ -12,6 +13,7 @@
 - NMT Heartbeat receiver (monitoring drive state)
 - kg-based torque input with motor conversion
 - Temperature and voltage telemetry display
+- Removed torque from TPDO
+- Activated watchdog in Drive controller
 
-## Future (on hold pending clarification with manufacturer)
-- Watchdog heartbeat consumer (drive auto-stop on host connection loss)
+## Future
