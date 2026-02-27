@@ -43,8 +43,12 @@ CURRENT_ACTUAL_PCT_PER_LSB = 0.1
 TORQUE_PCT_PER_LSB = 0.1
 
 # Timer intervals (ms)
-POLL_INTERVAL_MS = 5
-TX_INTERVAL_MS = 20
+CONTROL_INTERVAL_MS = 10  # Control layer cycle time
+POLL_INTERVAL_MS = 5      # Drive controller polling cycle time
+TX_INTERVAL_MS = 10       # Drive controller transmit cycle time
 
 # Watchdog
 WATCHDOG_ENABLED = True
+
+# Synthetic application-level error codes
+COMM_TIMEOUT_ERROR_CODE = 0x08000000

@@ -9,7 +9,8 @@ from config import (
     MODE_POSITION, MODE_TORQUE, MODE_VELOCITY,
     PROFILE_ACCEL_DEFAULT, PROFILE_DECEL_DEFAULT, QUICK_STOP_DECEL_DEFAULT,
     MAX_PROFILE_VELOCITY_DEFAULT,
-    POLL_INTERVAL_MS, TX_INTERVAL_MS, WATCHDOG_ENABLED
+    POLL_INTERVAL_MS, TX_INTERVAL_MS, WATCHDOG_ENABLED,
+    COMM_TIMEOUT_ERROR_CODE,
 )
 from scale import (
     rpm_to_raw, rpm_to_pulses_per_sec, cm_to_counts,
@@ -165,7 +166,7 @@ class DriveController(QtCore.QObject):
         self._pp_setpoint_delay = 0
         self._pp_wait_ack = False
         self._pp_ack_timeout = 0
-        self._last_target_position = None
+        self._last_position_setpoint_counter = -1
         self._last_torque_slope = None
         self._last_velocity_limit_raw = None
         self._last_mode = None
@@ -304,7 +305,7 @@ class DriveController(QtCore.QObject):
             self.status.emit("Motor stopped for safety")
 
             # Reset DC Bus Voltage max
-            self._state.update_feedback(dc_bus_voltage_max=0.0)
+            self._state.update_feedback(dc_bus_voltage_max=0.0, error_code=0)
 
             # Reset heartbeat timeout counter
             self._heartbeat_timeout_counter = 0
@@ -497,10 +498,11 @@ class DriveController(QtCore.QObject):
             target_position = cm_to_counts(cmd.target_position_cm)
             profile_velocity = rpm_to_pulses_per_sec(cmd.profile_velocity_rpm)
 
-            if cmd.target_position_cm != self._last_target_position:
+            # Trigger new setpoint when counter changes (even if position value is the same)
+            if cmd.position_setpoint_counter != self._last_position_setpoint_counter:
                 self._pp_setpoint_pending = True
                 self._pp_ack_timeout = 50
-                self._last_target_position = cmd.target_position_cm
+                self._last_position_setpoint_counter = cmd.position_setpoint_counter
 
             velocity_limit_raw = rpm_to_raw(cmd.velocity_limit_rpm)
             if (cmd.torque_slope != self._last_torque_slope or
@@ -593,6 +595,7 @@ class DriveController(QtCore.QObject):
         self._heartbeat_timeout_counter += 1
         if self._heartbeat_timeout_counter > self._heartbeat_timeout_limit:
             if flags.connected:
+                self._state.update_feedback(error_code=COMM_TIMEOUT_ERROR_CODE)
                 self.status.emit("ERROR: CAN communication lost! Disconnecting for safety.")
                 # Use emergency disconnect (no commands, just cleanup)
                 self._emergency_disconnect()
@@ -603,6 +606,7 @@ class DriveController(QtCore.QObject):
         except (serial.SerialException, OSError):
             # Connection lost, do emergency disconnect
             if flags.connected:
+                self._state.update_feedback(error_code=COMM_TIMEOUT_ERROR_CODE)
                 self.status.emit("ERROR: Serial connection lost! Disconnecting for safety.")
                 self._emergency_disconnect()
             return
@@ -612,6 +616,7 @@ class DriveController(QtCore.QObject):
             except (serial.SerialException, OSError):
                 # Connection lost during read
                 if flags.connected:
+                    self._state.update_feedback(error_code=COMM_TIMEOUT_ERROR_CODE)
                     self.status.emit("ERROR: Serial read error! Disconnecting for safety.")
                     self._emergency_disconnect()
                 return

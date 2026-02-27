@@ -9,10 +9,29 @@ import pyqtgraph as pg
 from config import (
     MODE_POSITION, MODE_TORQUE, MODE_VELOCITY
 )
+from gui_data import GuiState
 from drive_data import DriveState
+from Control import ControlLayer
 from m56s_drive_ctrl import DriveController
 
 class MainWindow(QtWidgets.QWidget):
+    ERROR_CODE_TEXTS = {
+        0x0000: "Kein Fehler",
+        0x08000000: "Kommunikationsfehler / Timeout",
+        0x1000: "Generischer Fehler",
+        0x2310: "Überstrom",
+        0x3210: "Überspannung DC-Bus",
+        0x3220: "Unterspannung DC-Bus",
+        0x4210: "Übertemperatur",
+        0x5113: "Geber/Sensor Fehler",
+        0x5441: "Reglerfehler",
+        0x6320: "Softwarefehler",
+        0x7300: "Last-/Motorfehler",
+        0x8110: "CAN Kommunikation",
+        0x8120: "CAN in Error Passive",
+        0x8130: "Heartbeat Fehler",
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("M56S Control (PySide6 + pyqtgraph)")
@@ -82,6 +101,10 @@ class MainWindow(QtWidgets.QWidget):
         self.tpdo4_label = QtWidgets.QLabel(
             "DC Bus: 0.0V (max: 0.0V) | Temps: Drive=0Â°C Chassis=0Â°C"
         )
+        self.error_code_label = QtWidgets.QLabel("Fehlercode")
+        self.error_code_output = QtWidgets.QLineEdit()
+        self.error_code_output.setReadOnly(True)
+        self.error_code_output.setText("0x0000 - Kein Fehler")
         self.statusword_label = QtWidgets.QLabel("Statusword: 0x----")
         self.status_bits_group = self._build_status_bits()
 
@@ -171,6 +194,8 @@ class MainWindow(QtWidgets.QWidget):
         status_details.addWidget(self.tpdo2_label)
         status_details.addWidget(self.tpdo3_label)
         status_details.addWidget(self.tpdo4_label)
+        status_details.addWidget(self.error_code_label)
+        status_details.addWidget(self.error_code_output)
         status_details.addWidget(self.statusword_label)
         status_details.addStretch(1)
 
@@ -183,10 +208,19 @@ class MainWindow(QtWidgets.QWidget):
         layout.addLayout(plot_controls)
         layout.addWidget(self.plot)
 
-        # Controller thread
-        self.state = DriveState()
+        # Architecture: GUI -> gui_state -> Control -> drive_state -> DriveController
+        self.gui_state = GuiState()
+        self.drive_state = DriveState()
+
+        # Control layer thread
+        self.control_thread = QtCore.QThread(self)
+        self.control_layer = ControlLayer(self.gui_state, self.drive_state)
+        self.control_layer.moveToThread(self.control_thread)
+        self.control_thread.started.connect(self.control_layer.start_control)
+
+        # Drive controller thread
         self.worker_thread = QtCore.QThread(self)
-        self.controller = DriveController(self.state)
+        self.controller = DriveController(self.drive_state)
         self.controller.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.controller.start_polling)
 
@@ -223,11 +257,15 @@ class MainWindow(QtWidgets.QWidget):
         self._torque_slope_committed()
         self._velocity_limit_committed()
         self._cycle_committed()
-        self.state.update_command(direction=self.direction_combo.currentData())
+        self.gui_state.update_command(direction=self.direction_combo.currentData())
+
+        # Start control layer and drive controller immediately
+        self.control_thread.start()
+        self.worker_thread.start()
 
     def _mode_changed(self, _):
         mode = self.mode_combo.currentData()
-        self.state.update_command(mode=mode)
+        self.gui_state.update_command(mode=mode)
         self.target_velocity_spin.setEnabled(mode in (MODE_VELOCITY, MODE_POSITION))
         self.target_torque_spin.setEnabled(True)
         self.target_position_spin.setEnabled(mode == MODE_POSITION)
@@ -238,42 +276,48 @@ class MainWindow(QtWidgets.QWidget):
         self._profile_velocity_committed()
 
     def _direction_changed(self, _):
-        self.state.update_command(direction=self.direction_combo.currentData())
+        self.gui_state.update_command(direction=self.direction_combo.currentData())
         self._target_velocity_committed()
         self._target_torque_committed()
 
     def _target_velocity_committed(self):
         self.target_velocity_spin.interpretText()
-        self.state.update_command(target_velocity_rpm=self.target_velocity_spin.value())
+        self.gui_state.update_command(target_velocity_rpm=self.target_velocity_spin.value())
 
     def _target_torque_committed(self):
         self.target_torque_spin.interpretText()
         # Store as mkg (kg Ã— 1000) for precision in integer field
         kg_value = self.target_torque_spin.value()
-        self.state.update_command(target_torque_mnm=kg_value * 1000)
+        self.gui_state.update_command(target_torque_mnm=kg_value * 1000)
 
 
     def _target_position_committed(self):
-        self.state.update_command(target_position_cm=self.target_position_spin.value())
+        # Increment counter to trigger new setpoint even if value didn't change
+        snapshot = self.gui_state.snapshot()
+        new_counter = snapshot.command.position_setpoint_counter + 1
+        self.gui_state.update_command(
+            target_position_cm=self.target_position_spin.value(),
+            position_setpoint_counter=new_counter
+        )
 
     def _profile_velocity_committed(self):
         self.profile_velocity_spin.interpretText()
-        self.state.update_command(profile_velocity_rpm=self.profile_velocity_spin.value())
+        self.gui_state.update_command(profile_velocity_rpm=self.profile_velocity_spin.value())
 
     def _cycle_committed(self):
         self.cycle_time_spin.interpretText()
-        self.state.update_command(cycle_time_ms=self.cycle_time_spin.value())
+        self.gui_state.update_command(cycle_time_ms=self.cycle_time_spin.value())
 
     def _torque_slope_committed(self):
         self.torque_slope_spin.interpretText()
-        self.state.update_command(torque_slope=self.torque_slope_spin.value())
+        self.gui_state.update_command(torque_slope=self.torque_slope_spin.value())
 
     def _velocity_limit_committed(self):
         self.velocity_limit_spin.interpretText()
-        self.state.update_command(velocity_limit_rpm=self.velocity_limit_spin.value())
+        self.gui_state.update_command(velocity_limit_rpm=self.velocity_limit_spin.value())
 
     def _refresh_from_state(self):
-        snapshot = self.state.snapshot()
+        snapshot = self.gui_state.snapshot()
         fb = snapshot.feedback
         self.tpdo1_label.setText(
             f"TPDO1: status=0x{fb.statusword:04X} err=0x{fb.error_code:04X} mode={fb.mode_display}"
@@ -292,16 +336,21 @@ class MainWindow(QtWidgets.QWidget):
         self.tpdo3_label.setText(
             f"TPDO3: current={fb.current_a:.2f} A torque={torque_nm:.2f} Nm"
         )
-        
+
         self.tpdo4_label.setText(
             f"DC Bus: {fb.dc_bus_voltage:.1f}V (max: {fb.dc_bus_voltage_max:.1f}V) | "
             f"Temps: Drive={fb.drive_temperature:.1f}Â°C Chassis={fb.chassis_temperature:.1f}Â°C"
         )
+        self.error_code_output.setText(self._format_error_code(fb.error_code))
 
         self._last_pos_cm = fb.position_cm
         self._last_vel_cm_s = fb.speed_cm_s
         self._last_torque_mnm = fb.torque_mnm
         self._append_plot()
+
+    def _format_error_code(self, error_code: int) -> str:
+        text = self.ERROR_CODE_TEXTS.get(error_code, "Unbekannter Fehlercode")
+        return f"0x{error_code:04X} - {text}"
 
     def _append_plot(self):
         if self._plot_paused:
@@ -350,23 +399,21 @@ class MainWindow(QtWidgets.QWidget):
         self.btn_pause_plot.setText("Resume plot" if self._plot_paused else "Pause plot")
 
     def _on_connect_clicked(self):
-        if not self.worker_thread.isRunning():
-            self.worker_thread.start()
-        self.state.update_flags(request_connect=True)
+        self.gui_state.update_flags(request_connect=True)
 
     def _on_disconnect_clicked(self):
-        self.state.update_flags(request_disconnect=True)
+        self.gui_state.update_flags(request_disconnect=True)
         # Don't stop the thread, just disconnect
         # The polling thread keeps running for faster reconnection
 
     def _on_start_clicked(self):
-        self.state.update_flags(request_start=True)
+        self.gui_state.update_flags(request_start=True)
 
     def _on_stop_clicked(self):
-        self.state.update_flags(request_stop=True)
+        self.gui_state.update_flags(request_stop=True)
 
     def _on_fault_reset_clicked(self):
-        self.state.update_flags(request_fault_reset=True)
+        self.gui_state.update_flags(request_fault_reset=True)
 
     def _build_status_bits(self):
         group = QtWidgets.QGroupBox("Statusword bits")
@@ -413,10 +460,13 @@ class MainWindow(QtWidgets.QWidget):
 
     def closeEvent(self, event):
         if self.worker_thread.isRunning():
-            self.state.update_flags(request_disconnect=True)
+            self.gui_state.update_flags(request_disconnect=True)
             QtCore.QThread.msleep(100)
             self.worker_thread.quit()
             self.worker_thread.wait(500)
+        if self.control_thread.isRunning():
+            self.control_thread.quit()
+            self.control_thread.wait(500)
         super().closeEvent(event)
 
 def main():

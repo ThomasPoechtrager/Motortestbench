@@ -1,4 +1,4 @@
-﻿from dataclasses import dataclass, field
+from dataclasses import dataclass, field
 from threading import Lock
 from typing import Optional
 
@@ -6,10 +6,10 @@ from config import MODE_TORQUE
 
 
 @dataclass
-class DriveCommand:
+class GuiCommand:
     mode: int = MODE_TORQUE
     target_velocity_rpm: int = 0
-    target_torque_mnm: int = 0  # stored as mkg (kg Ã— 1000) for precision
+    target_torque_mnm: int = 0  # stored as mkg (kg × 1000) for precision
     target_position_cm: int = 0
     position_setpoint_counter: int = 0  # Incremented on each position commit
     profile_velocity_rpm: int = 500
@@ -20,7 +20,7 @@ class DriveCommand:
 
 
 @dataclass
-class DriveFeedback:
+class GuiFeedback:
     position_cm: float = 0.0
     speed_cm_s: float = 0.0
     speed_rpm: float = 0.0
@@ -37,7 +37,7 @@ class DriveFeedback:
 
 
 @dataclass
-class DriveFlags:
+class GuiFlags:
     connected: bool = False
     running: bool = False
     fault: bool = False
@@ -50,10 +50,10 @@ class DriveFlags:
 
 
 @dataclass
-class DriveState:
-    command: DriveCommand = field(default_factory=DriveCommand)
-    feedback: DriveFeedback = field(default_factory=DriveFeedback)
-    flags: DriveFlags = field(default_factory=DriveFlags)
+class GuiState:
+    command: GuiCommand = field(default_factory=GuiCommand)
+    feedback: GuiFeedback = field(default_factory=GuiFeedback)
+    flags: GuiFlags = field(default_factory=GuiFlags)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def update_command(self, **kwargs) -> None:
@@ -74,10 +74,10 @@ class DriveState:
                 if hasattr(self.flags, key):
                     setattr(self.flags, key, value)
 
-    def snapshot(self) -> "DriveState":
+    def snapshot(self) -> "GuiState":
         with self._lock:
-            return DriveState(
-                command=DriveCommand(**self.command.__dict__),
-                feedback=DriveFeedback(**self.feedback.__dict__),
-                flags=DriveFlags(**self.flags.__dict__),
+            return GuiState(
+                command=GuiCommand(**self.command.__dict__),
+                feedback=GuiFeedback(**self.feedback.__dict__),
+                flags=GuiFlags(**self.flags.__dict__),
             )
