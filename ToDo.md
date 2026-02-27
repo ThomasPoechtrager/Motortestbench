@@ -4,6 +4,10 @@
 # Motortestbench
 - Änderungen nach Rückmeldung von Moons einarbeiten - Torque berechnung und Watchdog
 - Limit Konstanten nicht im Raw Wert sondern im Metrischen Werten
+- Saubere Sollwert übernahme
+- Timout trotz 1000ms immer wieder sporadisch - warum? 
+- Synchron Modus bauen
+
 
 ## Done
 - Motor control with Start/Stop

@@ -15,6 +15,9 @@ from Control import ControlLayer
 from m56s_drive_ctrl import DriveController
 
 class MainWindow(QtWidgets.QWidget):
+    shutdown_worker = QtCore.Signal()
+    shutdown_control = QtCore.Signal()
+
     ERROR_CODE_TEXTS = {
         0x0000: "Kein Fehler",
         0x08000000: "Kommunikationsfehler / Timeout",
@@ -35,7 +38,9 @@ class MainWindow(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("M56S Control (PySide6 + pyqtgraph)")
-        self._status_leds = {}
+        self.setMinimumSize(1200, 800)
+        self._status_leds_motor1 = {}
+        self._status_leds_motor2 = {}
 
         # UI
         self.mode_combo = QtWidgets.QComboBox()
@@ -44,17 +49,33 @@ class MainWindow(QtWidgets.QWidget):
         self.mode_combo.addItem("Position", MODE_POSITION)
         self.mode_combo.setCurrentIndex(1)
 
+        self.mode_combo_m2 = QtWidgets.QComboBox()
+        self.mode_combo_m2.addItem("Velocity", MODE_VELOCITY)
+        self.mode_combo_m2.addItem("Torque", MODE_TORQUE)
+        self.mode_combo_m2.addItem("Position", MODE_POSITION)
+        self.mode_combo_m2.setCurrentIndex(1)
+
         self.target_velocity_label = QtWidgets.QLabel("Target velocity (rpm)")
         self.target_velocity_spin = QtWidgets.QSpinBox()
         self.target_velocity_spin.setRange(-100000, 100000)
         self.target_velocity_spin.setValue(1000)
         self.target_velocity_spin.setKeyboardTracking(False)
 
+        self.target_velocity_spin_m2 = QtWidgets.QSpinBox()
+        self.target_velocity_spin_m2.setRange(-100000, 100000)
+        self.target_velocity_spin_m2.setValue(1000)
+        self.target_velocity_spin_m2.setKeyboardTracking(False)
+
         self.target_torque_label = QtWidgets.QLabel("Target load (kg)")
         self.target_torque_spin = QtWidgets.QSpinBox()
         self.target_torque_spin.setRange(0, 100)
         self.target_torque_spin.setValue(0)
         self.target_torque_spin.setKeyboardTracking(False)
+
+        self.target_torque_spin_m2 = QtWidgets.QSpinBox()
+        self.target_torque_spin_m2.setRange(0, 100)
+        self.target_torque_spin_m2.setValue(0)
+        self.target_torque_spin_m2.setKeyboardTracking(False)
 
         self.target_position_label = QtWidgets.QLabel("Target position (cm)")
         self.target_position_spin = QtWidgets.QDoubleSpinBox()
@@ -64,35 +85,71 @@ class MainWindow(QtWidgets.QWidget):
         self.target_position_spin.setValue(0)
         self.target_position_spin.setKeyboardTracking(False)
 
+        self.target_position_spin_m2 = QtWidgets.QDoubleSpinBox()
+        self.target_position_spin_m2.setRange(-10000, 10000)
+        self.target_position_spin_m2.setDecimals(0)
+        self.target_position_spin_m2.setSingleStep(1)
+        self.target_position_spin_m2.setValue(0)
+        self.target_position_spin_m2.setKeyboardTracking(False)
+
         self.profile_velocity_label = QtWidgets.QLabel("Profile velocity (rpm)")
         self.profile_velocity_spin = QtWidgets.QSpinBox()
         self.profile_velocity_spin.setRange(0, 100000)
         self.profile_velocity_spin.setValue(500)
         self.profile_velocity_spin.setKeyboardTracking(False)
 
+        self.profile_velocity_spin_m2 = QtWidgets.QSpinBox()
+        self.profile_velocity_spin_m2.setRange(0, 100000)
+        self.profile_velocity_spin_m2.setValue(500)
+        self.profile_velocity_spin_m2.setKeyboardTracking(False)
+
         self.torque_slope_spin = QtWidgets.QSpinBox()
         self.torque_slope_spin.setRange(0, 1_000_000)
         self.torque_slope_spin.setValue(50)
 
+        self.torque_slope_spin_m2 = QtWidgets.QSpinBox()
+        self.torque_slope_spin_m2.setRange(0, 1_000_000)
+        self.torque_slope_spin_m2.setValue(50)
+
         self.velocity_limit_spin = QtWidgets.QSpinBox()
         self.velocity_limit_spin.setRange(0, 10000)
         self.velocity_limit_spin.setValue(60)
+
+        self.velocity_limit_spin_m2 = QtWidgets.QSpinBox()
+        self.velocity_limit_spin_m2.setRange(0, 10000)
+        self.velocity_limit_spin_m2.setValue(60)
 
         self.cycle_time_spin = QtWidgets.QSpinBox()
         self.cycle_time_spin.setRange(1, 1000)
         self.cycle_time_spin.setValue(20)
         self.cycle_time_spin.setKeyboardTracking(False)
 
+        self.cycle_time_spin_m2 = QtWidgets.QSpinBox()
+        self.cycle_time_spin_m2.setRange(1, 1000)
+        self.cycle_time_spin_m2.setValue(20)
+        self.cycle_time_spin_m2.setKeyboardTracking(False)
+
         self.direction_combo = QtWidgets.QComboBox()
         self.direction_combo.addItem("CW", 1)
         self.direction_combo.addItem("CCW", -1)
         self.direction_combo.setCurrentIndex(1)
 
-        self.btn_connect = QtWidgets.QPushButton("Connect")
-        self.btn_disconnect = QtWidgets.QPushButton("Disconnect")
-        self.btn_start = QtWidgets.QPushButton("Start")
-        self.btn_stop = QtWidgets.QPushButton("Stop")
-        self.btn_fault_reset = QtWidgets.QPushButton("Fault reset")
+        self.direction_combo_m2 = QtWidgets.QComboBox()
+        self.direction_combo_m2.addItem("CW", 1)
+        self.direction_combo_m2.addItem("CCW", -1)
+        self.direction_combo_m2.setCurrentIndex(1)
+
+        self.btn_connect = QtWidgets.QPushButton("Connect M1")
+        self.btn_disconnect = QtWidgets.QPushButton("Disconnect M1")
+        self.btn_start = QtWidgets.QPushButton("Start M1")
+        self.btn_stop = QtWidgets.QPushButton("Stop M1")
+        self.btn_fault_reset = QtWidgets.QPushButton("Fault reset M1")
+
+        self.btn_connect_m2 = QtWidgets.QPushButton("Connect M2")
+        self.btn_disconnect_m2 = QtWidgets.QPushButton("Disconnect M2")
+        self.btn_start_m2 = QtWidgets.QPushButton("Start M2")
+        self.btn_stop_m2 = QtWidgets.QPushButton("Stop M2")
+        self.btn_fault_reset_m2 = QtWidgets.QPushButton("Fault reset M2")
 
         self.status = QtWidgets.QLabel("Disconnected")
         self.tpdo1_label = QtWidgets.QLabel("TPDO1: status=0x---- err=0x---- mode=--")
@@ -106,7 +163,20 @@ class MainWindow(QtWidgets.QWidget):
         self.error_code_output.setReadOnly(True)
         self.error_code_output.setText("0x0000 - Kein Fehler")
         self.statusword_label = QtWidgets.QLabel("Statusword: 0x----")
-        self.status_bits_group = self._build_status_bits()
+
+        self.motor2_header = QtWidgets.QLabel("Motor 2 (Node 2)")
+        self.motor2_tpdo1_label = QtWidgets.QLabel("TPDO1: status=0x---- err=0x---- mode=--")
+        self.motor2_tpdo2_label = QtWidgets.QLabel("TPDO2: pos=0 vel=0 rpm")
+        self.motor2_tpdo3_label = QtWidgets.QLabel("TPDO3: current=0 torque=0")
+        self.motor2_tpdo4_label = QtWidgets.QLabel(
+            "DC Bus: 0.0V (max: 0.0V) | Temps: Drive=0Â°C Chassis=0Â°C"
+        )
+        self.motor2_error_code_output = QtWidgets.QLineEdit()
+        self.motor2_error_code_output.setReadOnly(True)
+        self.motor2_error_code_output.setText("0x0000 - Kein Fehler")
+        self.motor2_statusword_label = QtWidgets.QLabel("Statusword: 0x----")
+        self.status_bits_group = self._build_status_bits("Statusword bits M1", self._status_leds_motor1)
+        self.status_bits_group_m2 = self._build_status_bits("Statusword bits M2", self._status_leds_motor2)
 
         # Plot
         self.plot = pg.PlotWidget(title="Telemetry")
@@ -166,14 +236,25 @@ class MainWindow(QtWidgets.QWidget):
         # Layout
         form = QtWidgets.QFormLayout()
         form.addRow("Mode", self.mode_combo)
-        form.addRow(self.target_velocity_label, self.target_velocity_spin)
-        form.addRow(self.target_torque_label, self.target_torque_spin)
-        form.addRow(self.target_position_label, self.target_position_spin)
-        form.addRow(self.profile_velocity_label, self.profile_velocity_spin)
+        form.addRow("Target velocity (rpm)", self.target_velocity_spin)
+        form.addRow("Target load (kg)", self.target_torque_spin)
+        form.addRow("Target position (cm)", self.target_position_spin)
+        form.addRow("Profile velocity (rpm)", self.profile_velocity_spin)
         form.addRow("Torque slope (0.1%/s)", self.torque_slope_spin)
         form.addRow("Velocity limit (motor rpm)", self.velocity_limit_spin)
         form.addRow("Direction", self.direction_combo)
         form.addRow("Cycle time (ms)", self.cycle_time_spin)
+
+        form_m2 = QtWidgets.QFormLayout()
+        form_m2.addRow("Mode", self.mode_combo_m2)
+        form_m2.addRow("Target velocity (rpm)", self.target_velocity_spin_m2)
+        form_m2.addRow("Target load (kg)", self.target_torque_spin_m2)
+        form_m2.addRow("Target position (cm)", self.target_position_spin_m2)
+        form_m2.addRow("Profile velocity (rpm)", self.profile_velocity_spin_m2)
+        form_m2.addRow("Torque slope (0.1%/s)", self.torque_slope_spin_m2)
+        form_m2.addRow("Velocity limit (motor rpm)", self.velocity_limit_spin_m2)
+        form_m2.addRow("Direction", self.direction_combo_m2)
+        form_m2.addRow("Cycle time (ms)", self.cycle_time_spin_m2)
 
         btns = QtWidgets.QHBoxLayout()
         btns.addWidget(self.btn_connect)
@@ -182,14 +263,34 @@ class MainWindow(QtWidgets.QWidget):
         btns.addWidget(self.btn_stop)
         btns.addWidget(self.btn_fault_reset)
 
+        btns_m2 = QtWidgets.QHBoxLayout()
+        btns_m2.addWidget(self.btn_connect_m2)
+        btns_m2.addWidget(self.btn_disconnect_m2)
+        btns_m2.addWidget(self.btn_start_m2)
+        btns_m2.addWidget(self.btn_stop_m2)
+        btns_m2.addWidget(self.btn_fault_reset_m2)
+
         layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addLayout(btns)
+        motor_controls_row = QtWidgets.QHBoxLayout()
+        motor1_col = QtWidgets.QVBoxLayout()
+        motor1_col.addWidget(QtWidgets.QLabel("Motor 1 Sollwerte"))
+        motor1_col.addLayout(form)
+        motor1_col.addLayout(btns)
+
+        motor2_col = QtWidgets.QVBoxLayout()
+        motor2_col.addWidget(QtWidgets.QLabel("Motor 2 Sollwerte"))
+        motor2_col.addLayout(form_m2)
+        motor2_col.addLayout(btns_m2)
+
+        motor_controls_row.addLayout(motor1_col)
+        motor_controls_row.addLayout(motor2_col)
+        layout.addLayout(motor_controls_row)
         layout.addWidget(self.status)
         status_row = QtWidgets.QHBoxLayout()
         status_row.addWidget(self.status_bits_group)
 
         status_details = QtWidgets.QVBoxLayout()
+        status_details.addWidget(QtWidgets.QLabel("Motor 1 (Node 1)"))
         status_details.addWidget(self.tpdo1_label)
         status_details.addWidget(self.tpdo2_label)
         status_details.addWidget(self.tpdo3_label)
@@ -197,9 +298,19 @@ class MainWindow(QtWidgets.QWidget):
         status_details.addWidget(self.error_code_label)
         status_details.addWidget(self.error_code_output)
         status_details.addWidget(self.statusword_label)
+        status_details.addSpacing(8)
+        status_details.addWidget(self.motor2_header)
+        status_details.addWidget(self.motor2_tpdo1_label)
+        status_details.addWidget(self.motor2_tpdo2_label)
+        status_details.addWidget(self.motor2_tpdo3_label)
+        status_details.addWidget(self.motor2_tpdo4_label)
+        status_details.addWidget(QtWidgets.QLabel("Fehlercode"))
+        status_details.addWidget(self.motor2_error_code_output)
+        status_details.addWidget(self.motor2_statusword_label)
         status_details.addStretch(1)
 
         status_row.addLayout(status_details)
+        status_row.addWidget(self.status_bits_group_m2)
         layout.addLayout(status_row)
         plot_controls = QtWidgets.QHBoxLayout()
         plot_controls.addWidget(self.btn_reset_plot)
@@ -208,21 +319,35 @@ class MainWindow(QtWidgets.QWidget):
         layout.addLayout(plot_controls)
         layout.addWidget(self.plot)
 
-        # Architecture: GUI -> gui_state -> Control -> drive_state -> DriveController
-        self.gui_state = GuiState()
-        self.drive_state = DriveState()
+        # Architecture: GUI -> gui_state -> Control -> {drive_state_motor1, drive_state_motor2} -> shared MotorDriver
+        self.gui_state_motor1 = GuiState()
+        self.gui_state_motor2 = GuiState()
+        self.drive_state_motor1 = DriveState()
+        self.drive_state_motor2 = DriveState()
+        self.drive_state = self.drive_state_motor1  # Backward compat for now
 
         # Control layer thread
         self.control_thread = QtCore.QThread(self)
-        self.control_layer = ControlLayer(self.gui_state, self.drive_state)
+        self.control_layer = ControlLayer(
+            {1: self.gui_state_motor1, 2: self.gui_state_motor2},
+            {1: self.drive_state_motor1, 2: self.drive_state_motor2}
+        )
         self.control_layer.moveToThread(self.control_thread)
         self.control_thread.started.connect(self.control_layer.start_control)
+        self.shutdown_control.connect(
+            self.control_layer.shutdown,
+            QtCore.Qt.ConnectionType.QueuedConnection
+        )
 
-        # Drive controller thread
+        # Drive controller thread - shared bus for motor 1 + 2
         self.worker_thread = QtCore.QThread(self)
-        self.controller = DriveController(self.drive_state)
+        self.controller = DriveController({1: self.drive_state_motor1, 2: self.drive_state_motor2})
         self.controller.moveToThread(self.worker_thread)
         self.worker_thread.started.connect(self.controller.start_polling)
+        self.shutdown_worker.connect(
+            self.controller.shutdown,
+            QtCore.Qt.ConnectionType.QueuedConnection
+        )
 
         # Signals
         self.btn_connect.clicked.connect(self._on_connect_clicked)
@@ -230,15 +355,29 @@ class MainWindow(QtWidgets.QWidget):
         self.btn_start.clicked.connect(self._on_start_clicked)
         self.btn_stop.clicked.connect(self._on_stop_clicked)
         self.btn_fault_reset.clicked.connect(self._on_fault_reset_clicked)
+        self.btn_connect_m2.clicked.connect(self._on_connect_clicked_m2)
+        self.btn_disconnect_m2.clicked.connect(self._on_disconnect_clicked_m2)
+        self.btn_start_m2.clicked.connect(self._on_start_clicked_m2)
+        self.btn_stop_m2.clicked.connect(self._on_stop_clicked_m2)
+        self.btn_fault_reset_m2.clicked.connect(self._on_fault_reset_clicked_m2)
         self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+        self.mode_combo_m2.currentIndexChanged.connect(self._mode_changed_m2)
         self.target_velocity_spin.editingFinished.connect(self._target_velocity_committed)
+        self.target_velocity_spin_m2.editingFinished.connect(self._target_velocity_committed_m2)
         self.target_torque_spin.editingFinished.connect(self._target_torque_committed)
+        self.target_torque_spin_m2.editingFinished.connect(self._target_torque_committed_m2)
         self.target_position_spin.editingFinished.connect(self._target_position_committed)
+        self.target_position_spin_m2.editingFinished.connect(self._target_position_committed_m2)
         self.profile_velocity_spin.editingFinished.connect(self._profile_velocity_committed)
+        self.profile_velocity_spin_m2.editingFinished.connect(self._profile_velocity_committed_m2)
         self.torque_slope_spin.editingFinished.connect(self._torque_slope_committed)
+        self.torque_slope_spin_m2.editingFinished.connect(self._torque_slope_committed_m2)
         self.velocity_limit_spin.editingFinished.connect(self._velocity_limit_committed)
+        self.velocity_limit_spin_m2.editingFinished.connect(self._velocity_limit_committed_m2)
         self.cycle_time_spin.editingFinished.connect(self._cycle_committed)
+        self.cycle_time_spin_m2.editingFinished.connect(self._cycle_committed_m2)
         self.direction_combo.currentIndexChanged.connect(self._direction_changed)
+        self.direction_combo_m2.currentIndexChanged.connect(self._direction_changed_m2)
         self.btn_reset_plot.clicked.connect(self._reset_plot)
         self.btn_pause_plot.clicked.connect(self._toggle_plot_pause)
         self.controller.status.connect(self.status.setText)
@@ -257,7 +396,17 @@ class MainWindow(QtWidgets.QWidget):
         self._torque_slope_committed()
         self._velocity_limit_committed()
         self._cycle_committed()
-        self.gui_state.update_command(direction=self.direction_combo.currentData())
+        self.gui_state_motor1.update_command(direction=self.direction_combo.currentData())
+
+        self._mode_changed_m2(self.mode_combo_m2.currentIndex())
+        self._target_velocity_committed_m2()
+        self._target_torque_committed_m2()
+        self._target_position_committed_m2()
+        self._profile_velocity_committed_m2()
+        self._torque_slope_committed_m2()
+        self._velocity_limit_committed_m2()
+        self._cycle_committed_m2()
+        self.gui_state_motor2.update_command(direction=self.direction_combo_m2.currentData())
 
         # Start control layer and drive controller immediately
         self.control_thread.start()
@@ -265,7 +414,7 @@ class MainWindow(QtWidgets.QWidget):
 
     def _mode_changed(self, _):
         mode = self.mode_combo.currentData()
-        self.gui_state.update_command(mode=mode)
+        self.gui_state_motor1.update_command(mode=mode)
         self.target_velocity_spin.setEnabled(mode in (MODE_VELOCITY, MODE_POSITION))
         self.target_torque_spin.setEnabled(True)
         self.target_position_spin.setEnabled(mode == MODE_POSITION)
@@ -276,54 +425,104 @@ class MainWindow(QtWidgets.QWidget):
         self._profile_velocity_committed()
 
     def _direction_changed(self, _):
-        self.gui_state.update_command(direction=self.direction_combo.currentData())
+        self.gui_state_motor1.update_command(direction=self.direction_combo.currentData())
         self._target_velocity_committed()
         self._target_torque_committed()
 
     def _target_velocity_committed(self):
         self.target_velocity_spin.interpretText()
-        self.gui_state.update_command(target_velocity_rpm=self.target_velocity_spin.value())
+        self.gui_state_motor1.update_command(target_velocity_rpm=self.target_velocity_spin.value())
 
     def _target_torque_committed(self):
         self.target_torque_spin.interpretText()
         # Store as mkg (kg Ã— 1000) for precision in integer field
         kg_value = self.target_torque_spin.value()
-        self.gui_state.update_command(target_torque_mnm=kg_value * 1000)
+        self.gui_state_motor1.update_command(target_torque_mnm=kg_value * 1000)
 
 
     def _target_position_committed(self):
         # Increment counter to trigger new setpoint even if value didn't change
-        snapshot = self.gui_state.snapshot()
+        snapshot = self.gui_state_motor1.snapshot()
         new_counter = snapshot.command.position_setpoint_counter + 1
-        self.gui_state.update_command(
+        self.gui_state_motor1.update_command(
             target_position_cm=self.target_position_spin.value(),
             position_setpoint_counter=new_counter
         )
 
     def _profile_velocity_committed(self):
         self.profile_velocity_spin.interpretText()
-        self.gui_state.update_command(profile_velocity_rpm=self.profile_velocity_spin.value())
+        self.gui_state_motor1.update_command(profile_velocity_rpm=self.profile_velocity_spin.value())
 
     def _cycle_committed(self):
         self.cycle_time_spin.interpretText()
-        self.gui_state.update_command(cycle_time_ms=self.cycle_time_spin.value())
+        self.gui_state_motor1.update_command(cycle_time_ms=self.cycle_time_spin.value())
 
     def _torque_slope_committed(self):
         self.torque_slope_spin.interpretText()
-        self.gui_state.update_command(torque_slope=self.torque_slope_spin.value())
+        self.gui_state_motor1.update_command(torque_slope=self.torque_slope_spin.value())
 
     def _velocity_limit_committed(self):
         self.velocity_limit_spin.interpretText()
-        self.gui_state.update_command(velocity_limit_rpm=self.velocity_limit_spin.value())
+        self.gui_state_motor1.update_command(velocity_limit_rpm=self.velocity_limit_spin.value())
+
+    def _mode_changed_m2(self, _):
+        mode = self.mode_combo_m2.currentData()
+        self.gui_state_motor2.update_command(mode=mode)
+        self.target_velocity_spin_m2.setEnabled(mode in (MODE_VELOCITY, MODE_POSITION))
+        self.target_torque_spin_m2.setEnabled(True)
+        self.target_position_spin_m2.setEnabled(mode == MODE_POSITION)
+        self.profile_velocity_spin_m2.setEnabled(mode == MODE_POSITION)
+        self._target_velocity_committed_m2()
+        self._target_torque_committed_m2()
+        self._target_position_committed_m2()
+        self._profile_velocity_committed_m2()
+
+    def _direction_changed_m2(self, _):
+        self.gui_state_motor2.update_command(direction=self.direction_combo_m2.currentData())
+        self._target_velocity_committed_m2()
+        self._target_torque_committed_m2()
+
+    def _target_velocity_committed_m2(self):
+        self.target_velocity_spin_m2.interpretText()
+        self.gui_state_motor2.update_command(target_velocity_rpm=self.target_velocity_spin_m2.value())
+
+    def _target_torque_committed_m2(self):
+        self.target_torque_spin_m2.interpretText()
+        kg_value = self.target_torque_spin_m2.value()
+        self.gui_state_motor2.update_command(target_torque_mnm=kg_value * 1000)
+
+    def _target_position_committed_m2(self):
+        snapshot = self.gui_state_motor2.snapshot()
+        new_counter = snapshot.command.position_setpoint_counter + 1
+        self.gui_state_motor2.update_command(
+            target_position_cm=self.target_position_spin_m2.value(),
+            position_setpoint_counter=new_counter
+        )
+
+    def _profile_velocity_committed_m2(self):
+        self.profile_velocity_spin_m2.interpretText()
+        self.gui_state_motor2.update_command(profile_velocity_rpm=self.profile_velocity_spin_m2.value())
+
+    def _cycle_committed_m2(self):
+        self.cycle_time_spin_m2.interpretText()
+        self.gui_state_motor2.update_command(cycle_time_ms=self.cycle_time_spin_m2.value())
+
+    def _torque_slope_committed_m2(self):
+        self.torque_slope_spin_m2.interpretText()
+        self.gui_state_motor2.update_command(torque_slope=self.torque_slope_spin_m2.value())
+
+    def _velocity_limit_committed_m2(self):
+        self.velocity_limit_spin_m2.interpretText()
+        self.gui_state_motor2.update_command(velocity_limit_rpm=self.velocity_limit_spin_m2.value())
 
     def _refresh_from_state(self):
-        snapshot = self.gui_state.snapshot()
+        snapshot = self.gui_state_motor1.snapshot()
         fb = snapshot.feedback
         self.tpdo1_label.setText(
             f"TPDO1: status=0x{fb.statusword:04X} err=0x{fb.error_code:04X} mode={fb.mode_display}"
         )
         self.statusword_label.setText(f"Statusword: 0x{fb.statusword:04X}")
-        self._update_status_bits(fb.statusword)
+        self._update_status_bits(fb.statusword, self._status_leds_motor1)
 
         self.tpdo2_label.setText(
             (
@@ -346,6 +545,30 @@ class MainWindow(QtWidgets.QWidget):
         self._last_pos_cm = fb.position_cm
         self._last_vel_cm_s = fb.speed_cm_s
         self._last_torque_mnm = fb.torque_mnm
+
+        motor2_snapshot = self.drive_state_motor2.snapshot()
+        motor2_fb = motor2_snapshot.feedback
+        self.motor2_tpdo1_label.setText(
+            f"TPDO1: status=0x{motor2_fb.statusword:04X} err=0x{motor2_fb.error_code:04X} mode={motor2_fb.mode_display}"
+        )
+        self.motor2_tpdo2_label.setText(
+            (
+                f"TPDO2: pos={motor2_fb.position_cm:.2f} cm vel={motor2_fb.speed_cm_s:.2f} cm/s "
+                f"({motor2_fb.speed_rpm:.0f} rpm)"
+            )
+        )
+        motor2_torque_nm = motor2_fb.torque_mnm / 1000.0
+        self.motor2_tpdo3_label.setText(
+            f"TPDO3: current={motor2_fb.current_a:.2f} A torque={motor2_torque_nm:.2f} Nm"
+        )
+        self.motor2_tpdo4_label.setText(
+            f"DC Bus: {motor2_fb.dc_bus_voltage:.1f}V (max: {motor2_fb.dc_bus_voltage_max:.1f}V) | "
+            f"Temps: Drive={motor2_fb.drive_temperature:.1f}Â°C Chassis={motor2_fb.chassis_temperature:.1f}Â°C"
+        )
+        self.motor2_error_code_output.setText(self._format_error_code(motor2_fb.error_code))
+        self.motor2_statusword_label.setText(f"Statusword: 0x{motor2_fb.statusword:04X}")
+        self._update_status_bits(motor2_fb.statusword, self._status_leds_motor2)
+
         self._append_plot()
 
     def _format_error_code(self, error_code: int) -> str:
@@ -399,24 +622,39 @@ class MainWindow(QtWidgets.QWidget):
         self.btn_pause_plot.setText("Resume plot" if self._plot_paused else "Pause plot")
 
     def _on_connect_clicked(self):
-        self.gui_state.update_flags(request_connect=True)
+        self.gui_state_motor1.update_flags(request_connect=True)
 
     def _on_disconnect_clicked(self):
-        self.gui_state.update_flags(request_disconnect=True)
+        self.gui_state_motor1.update_flags(request_disconnect=True)
         # Don't stop the thread, just disconnect
         # The polling thread keeps running for faster reconnection
 
     def _on_start_clicked(self):
-        self.gui_state.update_flags(request_start=True)
+        self.gui_state_motor1.update_flags(request_start=True)
 
     def _on_stop_clicked(self):
-        self.gui_state.update_flags(request_stop=True)
+        self.gui_state_motor1.update_flags(request_stop=True)
 
     def _on_fault_reset_clicked(self):
-        self.gui_state.update_flags(request_fault_reset=True)
+        self.gui_state_motor1.update_flags(request_fault_reset=True)
 
-    def _build_status_bits(self):
-        group = QtWidgets.QGroupBox("Statusword bits")
+    def _on_connect_clicked_m2(self):
+        self.gui_state_motor2.update_flags(request_connect=True)
+
+    def _on_disconnect_clicked_m2(self):
+        self.gui_state_motor2.update_flags(request_disconnect=True)
+
+    def _on_start_clicked_m2(self):
+        self.gui_state_motor2.update_flags(request_start=True)
+
+    def _on_stop_clicked_m2(self):
+        self.gui_state_motor2.update_flags(request_stop=True)
+
+    def _on_fault_reset_clicked_m2(self):
+        self.gui_state_motor2.update_flags(request_fault_reset=True)
+
+    def _build_status_bits(self, title: str, led_store: dict):
+        group = QtWidgets.QGroupBox(title)
         grid = QtWidgets.QGridLayout(group)
 
         bit_defs = [
@@ -440,13 +678,13 @@ class MainWindow(QtWidgets.QWidget):
             text.setFixedWidth(180)
             grid.addWidget(led, row, 0)
             grid.addWidget(text, row, 1)
-            self._status_leds[bit] = led
+            led_store[bit] = led
 
         grid.setColumnStretch(2, 0)
         return group
 
-    def _update_status_bits(self, statusword: int):
-        for bit, led in self._status_leds.items():
+    def _update_status_bits(self, statusword: int, led_store: dict):
+        for bit, led in led_store.items():
             is_set = bool(statusword & (1 << bit))
             if bit == 3:
                 color = "#d9534f" if is_set else "#333"
@@ -460,21 +698,31 @@ class MainWindow(QtWidgets.QWidget):
 
     def closeEvent(self, event):
         if self.worker_thread.isRunning():
-            self.gui_state.update_flags(request_disconnect=True)
+            self.gui_state_motor1.update_flags(request_disconnect=True)
+            self.gui_state_motor2.update_flags(request_disconnect=True)
+            QtCore.QThread.msleep(100)
+            self.shutdown_worker.emit()
             QtCore.QThread.msleep(100)
             self.worker_thread.quit()
-            self.worker_thread.wait(500)
+            self.worker_thread.wait(1000)
         if self.control_thread.isRunning():
+            self.shutdown_control.emit()
+            QtCore.QThread.msleep(50)
             self.control_thread.quit()
-            self.control_thread.wait(500)
+            self.control_thread.wait(1000)
         super().closeEvent(event)
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
     w = MainWindow()
-    w.resize(600, 400)
+    w.resize(1400, 900)
     w.show()
-    sys.exit(app.exec())
+    try:
+        return app.exec()
+    except KeyboardInterrupt:
+        if w.isVisible():
+            w.close()
+        return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
