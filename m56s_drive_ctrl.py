@@ -5,11 +5,12 @@ from PySide6 import QtCore
 from config import (
     COM_PORT, SERIAL_BAUD, CAN_BITRATE_CODE, NODE_ID,
     COB_NMT, COB_SDO_RX_BASE, COB_RPDO1_BASE, COB_RPDO2_BASE, COB_RPDO3_BASE, COB_RPDO4_BASE,
-    CW_SHUTDOWN, CW_SWITCH_ON, CW_ENABLE_OPERATION, CW_DISABLE_VOLTAGE,
-    MODE_POSITION, MODE_TORQUE, MODE_VELOCITY,
+    CW_SHUTDOWN, CW_DISABLE_VOLTAGE,
+    MODE_POSITION,
     PROFILE_ACCEL_DEFAULT, PROFILE_DECEL_DEFAULT, QUICK_STOP_DECEL_DEFAULT,
     MAX_PROFILE_VELOCITY_DEFAULT,
     POLL_INTERVAL_MS, TX_INTERVAL_MS, WATCHDOG_ENABLED,
+    HEARTBEAT_PRODUCER_MS, HEARTBEAT_TIMEOUT_MS,
     COMM_TIMEOUT_ERROR_CODE,
 )
 from scale import (
@@ -161,22 +162,17 @@ class DriveController(QtCore.QObject):
         self._timer = None
         self._tx_timer = None
         self._rx_buf = bytearray()
-        self._heartbeat_timeout_limit = 300  # 300 * 5ms = 1.5 seconds
+        self._heartbeat_timeout_limit = max(1, int(HEARTBEAT_TIMEOUT_MS / POLL_INTERVAL_MS))
 
         self._runtime = {
             node_id: {
-                "running": False,
-                "pp_setpoint_pending": False,
-                "pp_setpoint_pulse": 0,
-                "pp_setpoint_delay": 0,
-                "last_position_setpoint_counter": -1,
-                "last_torque_slope": None,
-                "last_velocity_limit_raw": None,
-                "last_mode": None,
                 "reinitializing": False,
                 "last_heartbeat_state": None,
                 "heartbeat_timeout_counter": 0,
                 "last_fault_state": False,
+                "last_torque_slope": None,
+                "last_velocity_limit_raw": None,
+                "last_mode": None,
             }
             for node_id in self._node_ids
         }
@@ -212,13 +208,34 @@ class DriveController(QtCore.QObject):
             self._timer = None
         self._emergency_disconnect_all()
 
-    def _reset_pp_runtime(self, node_id: int, keep_last_counter: bool = True):
-        runtime = self._runtime[node_id]
-        runtime["pp_setpoint_pending"] = False
-        runtime["pp_setpoint_pulse"] = 0
-        runtime["pp_setpoint_delay"] = 0
-        if not keep_last_counter:
-            runtime["last_position_setpoint_counter"] = -1
+    def _service_connected_nodes(self, exclude_node_id: int | None = None):
+        if not self.ser:
+            return
+        for other_node_id in self._node_ids:
+            if exclude_node_id is not None and other_node_id == exclude_node_id:
+                continue
+            if self._drive_states[other_node_id].snapshot().flags.connected:
+                self._send_cyclic_for_node(other_node_id)
+        try:
+            pending = self.ser.in_waiting
+        except (serial.SerialException, OSError):
+            return
+        if pending:
+            try:
+                chunk = self.ser.read(pending)
+            except (serial.SerialException, OSError):
+                return
+            if chunk:
+                self._rx_buf.extend(chunk)
+                self._parse_rx_frames()
+
+    def _sleep_with_service(self, total_ms: int, exclude_node_id: int | None = None):
+        remaining = max(0, int(total_ms))
+        while remaining > 0:
+            step_ms = 10 if remaining >= 10 else remaining
+            QtCore.QThread.msleep(step_ms)
+            self._service_connected_nodes(exclude_node_id=exclude_node_id)
+            remaining -= step_ms
 
     def _open_bus(self):
         if self.ser:
@@ -268,32 +285,32 @@ class DriveController(QtCore.QObject):
         state = self._drive_states[node_id]
         runtime = self._runtime[node_id]
         try:
-            sdo_write_u16(self.ser, 0x1017, 0x00, 1000, node_id)
+            sdo_write_u16(self.ser, 0x1017, 0x00, HEARTBEAT_PRODUCER_MS, node_id)
             nmt_send(self.ser, 0x80, node_id)
-            QtCore.QThread.msleep(150)
+            self._sleep_with_service(150, exclude_node_id=node_id)
             nmt_send(self.ser, 0x01, node_id)
-            QtCore.QThread.msleep(150)
+            self._sleep_with_service(150, exclude_node_id=node_id)
 
             cmd = state.snapshot().command
             sdo_write_u8(self.ser, 0x6060, 0x00, int(cmd.mode), node_id)
-            QtCore.QThread.msleep(10)
+            self._sleep_with_service(10, exclude_node_id=node_id)
             sdo_write_u32(self.ser, 0x6083, 0x00, PROFILE_ACCEL_DEFAULT, node_id)
             sdo_write_u32(self.ser, 0x6084, 0x00, PROFILE_DECEL_DEFAULT, node_id)
-            QtCore.QThread.msleep(10)
+            self._sleep_with_service(10, exclude_node_id=node_id)
             sdo_write_u32(self.ser, 0x6085, 0x00, QUICK_STOP_DECEL_DEFAULT, node_id)
             sdo_write_u32(self.ser, 0x607F, 0x00, MAX_PROFILE_VELOCITY_DEFAULT, node_id)
-            QtCore.QThread.msleep(10)
+            self._sleep_with_service(10, exclude_node_id=node_id)
 
             if WATCHDOG_ENABLED:
                 sdo_write_u16(self.ser, 0x2060, 0x01, 0x0001, node_id)
-                QtCore.QThread.msleep(20)
+                self._sleep_with_service(20, exclude_node_id=node_id)
                 sdo_write_u16(self.ser, 0x2060, 0x02, 0x0001, node_id)
-                QtCore.QThread.msleep(20)
+                self._sleep_with_service(20, exclude_node_id=node_id)
             else:
                 sdo_write_u16(self.ser, 0x2060, 0x01, 0x0000, node_id)
-                QtCore.QThread.msleep(20)
+                self._sleep_with_service(20, exclude_node_id=node_id)
                 sdo_write_u16(self.ser, 0x2060, 0x02, 0x0000, node_id)
-                QtCore.QThread.msleep(20)
+                self._sleep_with_service(20, exclude_node_id=node_id)
 
             velocity_limit_raw = rpm_to_raw(cmd.velocity_limit_rpm)
             rpdo2_send(self.ser, cmd.torque_slope, velocity_limit_raw, node_id=node_id)
@@ -302,8 +319,6 @@ class DriveController(QtCore.QObject):
             runtime["last_mode"] = cmd.mode
             runtime["heartbeat_timeout_counter"] = 0
             runtime["last_fault_state"] = False
-            runtime["running"] = False
-            self._reset_pp_runtime(node_id, keep_last_counter=False)
 
             state.update_feedback(dc_bus_voltage_max=0.0, error_code=0)
             state.update_flags(connected=True, running=False)
@@ -313,8 +328,7 @@ class DriveController(QtCore.QObject):
 
     def _emergency_disconnect_all(self):
         self._close_bus()
-        for node_id, state in self._drive_states.items():
-            self._runtime[node_id]["running"] = False
+        for _, state in self._drive_states.items():
             state.update_flags(connected=False, running=False)
 
     def _send_disable_sequence(self, node_id: int):
@@ -323,43 +337,9 @@ class DriveController(QtCore.QObject):
         cmd = self._drive_states[node_id].snapshot().command
         rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0, node_id=node_id)
         rpdo3_send(self.ser, target_velocity=0, target_position=0, node_id=node_id)
-        QtCore.QThread.msleep(10)
+        self._sleep_with_service(10, exclude_node_id=node_id)
         rpdo1_send(self.ser, CW_DISABLE_VOLTAGE, cmd.mode, target_torque=0, node_id=node_id)
-
-    def _start_motor(self, node_id: int):
-        if not self.ser:
-            self.status.emit(f"Node {node_id}: bus not connected")
-            return
-        state = self._drive_states[node_id]
-        if not state.snapshot().flags.connected:
-            self.status.emit(f"Node {node_id}: not connected")
-            return
-        if state.snapshot().flags.fault:
-            self.status.emit(f"Node {node_id}: fault active, please fault reset")
-            return
-        cmd = state.snapshot().command
-        try:
-            rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0, node_id=node_id)
-            QtCore.QThread.msleep(20)
-            rpdo1_send(self.ser, CW_SWITCH_ON, cmd.mode, target_torque=0, node_id=node_id)
-            QtCore.QThread.msleep(20)
-            rpdo1_send(self.ser, CW_ENABLE_OPERATION, cmd.mode, target_torque=0, node_id=node_id)
-            QtCore.QThread.msleep(30)
-            self._runtime[node_id]["running"] = True
-            self._reset_pp_runtime(node_id, keep_last_counter=False)
-            state.update_flags(running=True)
-            self.status.emit(f"Node {node_id}: started")
-        except (serial.SerialException, OSError) as e:
-            self.status.emit(f"Node {node_id}: start error: {e}")
-
-    def _stop_motor(self, node_id: int):
-        if not self.ser:
-            return
-        self._send_disable_sequence(node_id)
-        self._runtime[node_id]["running"] = False
-        self._reset_pp_runtime(node_id, keep_last_counter=True)
-        self._drive_states[node_id].update_flags(running=False)
-        self.status.emit(f"Node {node_id}: stopped")
+        self._runtime[node_id]["last_controlword"] = CW_DISABLE_VOLTAGE
 
     def _fault_reset(self, node_id: int):
         if not self.ser:
@@ -367,17 +347,14 @@ class DriveController(QtCore.QObject):
             return
         state = self._drive_states[node_id]
         cmd = state.snapshot().command
-        self._runtime[node_id]["running"] = False
-        self._reset_pp_runtime(node_id, keep_last_counter=False)
-        state.update_flags(running=False)
         try:
             cw = CW_SHUTDOWN | 0x0080
             rpdo1_send(self.ser, cw, cmd.mode, target_torque=0, node_id=node_id)
-            QtCore.QThread.msleep(20)
+            self._sleep_with_service(20, exclude_node_id=node_id)
             rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0, node_id=node_id)
-            QtCore.QThread.msleep(20)
+            self._sleep_with_service(20, exclude_node_id=node_id)
             nmt_send(self.ser, 0x82, node_id)
-            QtCore.QThread.msleep(150)
+            self._sleep_with_service(150, exclude_node_id=node_id)
             self._initialize_node(node_id)
             state.update_flags(fault=False)
             self.status.emit(f"Node {node_id}: fault reset")
@@ -394,6 +371,7 @@ class DriveController(QtCore.QObject):
                 self._tx_timer.setInterval(self.tx_interval_ms)
 
     def _send_cyclic_for_node(self, node_id: int):
+        """Send cyclic RPDOs - controlword managed by Control layer"""
         if not self.ser:
             return
         state = self._drive_states[node_id]
@@ -401,68 +379,47 @@ class DriveController(QtCore.QObject):
         cmd = snapshot.command
         runtime = self._runtime[node_id]
 
-        if runtime["running"]:
-            if runtime["last_mode"] != cmd.mode:
-                sdo_write_u8(self.ser, 0x6060, 0x00, int(cmd.mode), node_id)
-                runtime["last_mode"] = cmd.mode
+        # Update mode if changed
+        if runtime["last_mode"] != cmd.mode:
+            sdo_write_u8(self.ser, 0x6060, 0x00, int(cmd.mode), node_id)
+            runtime["last_mode"] = cmd.mode
 
-            direction = 1 if int(cmd.direction) >= 0 else -1
-            target_velocity = rpm_to_raw(cmd.target_velocity_rpm) * direction
-            torque_nm = kg_to_motor_torque_nm(float(cmd.target_torque_mnm) / 1000.0)
-            target_torque = torque_nm_to_raw(torque_nm) * direction
-            target_position = cm_to_counts(cmd.target_position_cm)
-            profile_velocity = rpm_to_pulses_per_sec(cmd.profile_velocity_rpm)
+        # Update torque slope & velocity limit if changed
+        velocity_limit_raw = rpm_to_raw(cmd.velocity_limit_rpm)
+        if (
+            cmd.torque_slope != runtime["last_torque_slope"]
+            or velocity_limit_raw != runtime["last_velocity_limit_raw"]
+        ):
+            rpdo2_send(self.ser, cmd.torque_slope, velocity_limit_raw, node_id=node_id)
+            runtime["last_torque_slope"] = cmd.torque_slope
+            runtime["last_velocity_limit_raw"] = velocity_limit_raw
 
-            if cmd.position_setpoint_counter != runtime["last_position_setpoint_counter"]:
-                runtime["pp_setpoint_pending"] = True
-                runtime["last_position_setpoint_counter"] = cmd.position_setpoint_counter
+        # Prepare setpoint values
+        direction = 1 if int(cmd.direction) >= 0 else -1
+        target_velocity = rpm_to_raw(cmd.target_velocity_rpm) * direction
+        torque_nm = kg_to_motor_torque_nm(float(cmd.target_torque_mnm) / 1000.0)
+        target_torque = torque_nm_to_raw(torque_nm) * direction
+        target_position = cm_to_counts(cmd.target_position_cm)
+        profile_velocity = rpm_to_pulses_per_sec(cmd.profile_velocity_rpm)
 
-            velocity_limit_raw = rpm_to_raw(cmd.velocity_limit_rpm)
-            if (
-                cmd.torque_slope != runtime["last_torque_slope"]
-                or velocity_limit_raw != runtime["last_velocity_limit_raw"]
-            ):
-                rpdo2_send(self.ser, cmd.torque_slope, velocity_limit_raw, node_id=node_id)
-                runtime["last_torque_slope"] = cmd.torque_slope
-                runtime["last_velocity_limit_raw"] = velocity_limit_raw
-
-            cw = CW_ENABLE_OPERATION
-            if cmd.mode == MODE_VELOCITY:
-                rpdo1_send(self.ser, cw, MODE_VELOCITY, target_torque=0, node_id=node_id)
-                rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position, node_id=node_id)
-            elif cmd.mode == MODE_POSITION:
-                if runtime["pp_setpoint_pending"]:
-                    runtime["pp_setpoint_delay"] = 1
-                    runtime["pp_setpoint_pulse"] = 2
-                    runtime["pp_setpoint_pending"] = False
-
-                cw |= 0x0020
-                cw &= ~0x0040
-                if runtime["pp_setpoint_delay"] > 0:
-                    runtime["pp_setpoint_delay"] -= 1
-                elif runtime["pp_setpoint_pulse"] > 0:
-                    cw |= 0x0010
-                    cw |= 0x0200
-                    runtime["pp_setpoint_pulse"] -= 1
-
-                rpdo1_send(self.ser, cw, MODE_POSITION, target_torque=0, node_id=node_id)
-                rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position, node_id=node_id)
+        # Send controlword from Control layer (RPDO1)
+        try:
+            rpdo1_send(self.ser, cmd.controlword, cmd.mode, target_torque=target_torque, node_id=node_id)
+            
+            # Send setpoints (RPDO3)
+            rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position, node_id=node_id)
+            
+            # Send profile velocity for position mode (RPDO4)
+            if cmd.mode == MODE_POSITION:
                 rpdo4_send(self.ser, profile_velocity=profile_velocity, node_id=node_id)
-            else:
-                rpdo1_send(self.ser, cw, MODE_TORQUE, target_torque=target_torque, node_id=node_id)
-                rpdo3_send(self.ser, target_velocity=target_velocity, target_position=target_position, node_id=node_id)
-        else:
-            try:
-                rpdo1_send(self.ser, CW_SHUTDOWN, cmd.mode, target_torque=0, node_id=node_id)
-                rpdo3_send(self.ser, target_velocity=0, target_position=0, node_id=node_id)
-            except (serial.SerialException, OSError):
-                pass
+        except (serial.SerialException, OSError):
+            pass
 
     def _send_cyclic(self):
         if not self.ser:
             return
         self._sync_cycle_time()
-        for node_id in self._node_ids:
+        for node_id in sorted(self._node_ids):
             if self._drive_states[node_id].snapshot().flags.connected:
                 self._send_cyclic_for_node(node_id)
 
@@ -507,7 +464,7 @@ class DriveController(QtCore.QObject):
 
     def _handle_can_frame(self, can_id: int, dlc: int, data: bytes):
         if 0x700 <= can_id <= 0x77F and dlc >= 1:
-            node_id = can_id - 0x700
+            node_id = can_id - 0x700  # node_id extraction from heartbeat COB-ID
             if node_id in self._drive_states:
                 self._runtime[node_id]["heartbeat_timeout_counter"] = 0
                 hb_state = data[0]
@@ -520,14 +477,14 @@ class DriveController(QtCore.QObject):
                 if needs_reinit:
                     self._runtime[node_id]["reinitializing"] = True
                     self.status.emit(f"Node {node_id}: reinitializing from HB state 0x{hb_state:02X}")
-                    QtCore.QThread.msleep(80)
+                    self._sleep_with_service(80, exclude_node_id=node_id)
                     self._initialize_node(node_id)
                     self._runtime[node_id]["reinitializing"] = False
                 self._runtime[node_id]["last_heartbeat_state"] = hb_state
             return
 
         if 0x180 <= can_id <= 0x1FF and dlc >= 5:
-            node_id = can_id - 0x180
+            node_id = can_id - 0x180  # node_id extraction from TPDO1 COB-ID
             if node_id in self._drive_states:
                 state = self._drive_states[node_id]
                 runtime = self._runtime[node_id]
@@ -535,10 +492,9 @@ class DriveController(QtCore.QObject):
                 statusword, error_code, mode_disp = struct.unpack_from("<HHB", data, 0)
                 fault = bool(statusword & (1 << 3))
                 target_reached = bool(statusword & (1 << 10))
-                if fault and not runtime["last_fault_state"] and runtime["running"]:
-                    runtime["running"] = False
-                    state.update_flags(running=False)
-                    self.status.emit(f"Node {node_id}: FAULT 0x{error_code:04X}, stopped")
+                if fault and not runtime["last_fault_state"]:
+                    # Only report fault, let Control layer manage running state
+                    self.status.emit(f"Node {node_id}: FAULT 0x{error_code:04X}")
                 runtime["last_fault_state"] = fault
                 state.update_feedback(
                     statusword=statusword,
@@ -550,7 +506,7 @@ class DriveController(QtCore.QObject):
             return
 
         if 0x280 <= can_id <= 0x2FF and dlc >= 8:
-            node_id = can_id - 0x280
+            node_id = can_id - 0x280  # node_id extraction from TPDO2 COB-ID
             if node_id in self._drive_states:
                 state = self._drive_states[node_id]
                 self._runtime[node_id]["heartbeat_timeout_counter"] = 0
@@ -564,7 +520,7 @@ class DriveController(QtCore.QObject):
             return
 
         if 0x380 <= can_id <= 0x3FF and dlc >= 2:
-            node_id = can_id - 0x380
+            node_id = can_id - 0x380  # node_id extraction from TPDO3 COB-ID
             if node_id in self._drive_states:
                 state = self._drive_states[node_id]
                 self._runtime[node_id]["heartbeat_timeout_counter"] = 0
@@ -600,11 +556,11 @@ class DriveController(QtCore.QObject):
                     self._open_bus()
                     if self.ser:
                         nmt_send(self.ser, 0x82, node_id)
-                        QtCore.QThread.msleep(120)
+                        self._sleep_with_service(120, exclude_node_id=node_id)
                         self._initialize_node(node_id)
                 except (serial.SerialException, OSError, ValueError) as e:
                     self.status.emit(f"Node {node_id}: connect error: {e}")
-                    state.update_flags(connected=False, running=False)
+                    state.update_flags(connected=False)  # Let Control layer manage running
                 finally:
                     state.update_flags(request_connect=False)
 
@@ -614,7 +570,6 @@ class DriveController(QtCore.QObject):
                         self._send_disable_sequence(node_id)
                     except (serial.SerialException, OSError):
                         pass
-                self._runtime[node_id]["running"] = False
                 state.update_flags(connected=False, running=False, request_disconnect=False)
                 self.status.emit(f"Node {node_id}: disconnected")
 
@@ -622,13 +577,8 @@ class DriveController(QtCore.QObject):
                 self._fault_reset(node_id)
                 state.update_flags(request_fault_reset=False)
 
-            if flags.request_start:
-                self._start_motor(node_id)
-                state.update_flags(request_start=False)
-
-            if flags.request_stop:
-                self._stop_motor(node_id)
-                state.update_flags(request_stop=False)
+            # Note: request_start and request_stop are now handled by Control layer
+            # which manages the controlword state machine
 
         connected_nodes = [
             node_id for node_id, state in self._drive_states.items() if state.snapshot().flags.connected
@@ -647,8 +597,8 @@ class DriveController(QtCore.QObject):
             runtime["heartbeat_timeout_counter"] += 1
             if runtime["heartbeat_timeout_counter"] > self._heartbeat_timeout_limit:
                 self._drive_states[node_id].update_feedback(error_code=COMM_TIMEOUT_ERROR_CODE)
-                self._drive_states[node_id].update_flags(connected=False, running=False)
-                runtime["running"] = False
+                # Disconnect on timeout, but let Control layer manage running state
+                self._drive_states[node_id].update_flags(connected=False)
                 self.status.emit(f"Node {node_id}: communication timeout")
 
         try:

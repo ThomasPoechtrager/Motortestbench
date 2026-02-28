@@ -2,14 +2,14 @@
 from threading import Lock
 from typing import Optional
 
-from config import MODE_TORQUE
+from config import MODE_TORQUE, CW_SHUTDOWN
 
 
 @dataclass
 class DriveCommand:
     mode: int = MODE_TORQUE
     target_velocity_rpm: int = 0
-    target_torque_mnm: int = 0  # stored as mkg (kg Ã— 1000) for precision
+    target_torque_mnm: int = 0  # stored as mkg (kg × 1000) for precision
     target_position_cm: int = 0
     position_setpoint_counter: int = 0  # Incremented on each position commit
     profile_velocity_rpm: int = 500
@@ -17,6 +17,7 @@ class DriveCommand:
     cycle_time_ms: int = 20
     torque_slope: int = 50
     velocity_limit_rpm: int = 60
+    controlword: int = CW_SHUTDOWN  # CiA402 controlword - managed by Control layer
 
 
 @dataclass

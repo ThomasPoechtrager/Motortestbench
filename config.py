@@ -46,6 +46,8 @@ TORQUE_PCT_PER_LSB = 0.1
 CONTROL_INTERVAL_MS = 10  # Control layer cycle time
 POLL_INTERVAL_MS = 5      # Drive controller polling cycle time
 TX_INTERVAL_MS = 10       # Drive controller transmit cycle time
+HEARTBEAT_PRODUCER_MS = 1000  # 0x1017 producer heartbeat time written to drive
+HEARTBEAT_TIMEOUT_MS = 3000   # local communication timeout guard (should be > producer)
 
 # Watchdog
 WATCHDOG_ENABLED = True

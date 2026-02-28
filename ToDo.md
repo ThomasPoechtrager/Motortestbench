@@ -7,6 +7,8 @@
 - Saubere Sollwert übernahme
 - Timout trotz 1000ms immer wieder sporadisch - warum? 
 - Synchron Modus bauen
+- Beim Busverlust auf off schalten
+- Sollwerte werden nicht sofort übernommen
 
 
 ## Done

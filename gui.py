@@ -441,6 +441,7 @@ class MainWindow(QtWidgets.QWidget):
 
 
     def _target_position_committed(self):
+        self.target_position_spin.interpretText()
         # Increment counter to trigger new setpoint even if value didn't change
         snapshot = self.gui_state_motor1.snapshot()
         new_counter = snapshot.command.position_setpoint_counter + 1
@@ -492,6 +493,7 @@ class MainWindow(QtWidgets.QWidget):
         self.gui_state_motor2.update_command(target_torque_mnm=kg_value * 1000)
 
     def _target_position_committed_m2(self):
+        self.target_position_spin_m2.interpretText()
         snapshot = self.gui_state_motor2.snapshot()
         new_counter = snapshot.command.position_setpoint_counter + 1
         self.gui_state_motor2.update_command(
@@ -546,7 +548,7 @@ class MainWindow(QtWidgets.QWidget):
         self._last_vel_cm_s = fb.speed_cm_s
         self._last_torque_mnm = fb.torque_mnm
 
-        motor2_snapshot = self.drive_state_motor2.snapshot()
+        motor2_snapshot = self.gui_state_motor2.snapshot()
         motor2_fb = motor2_snapshot.feedback
         self.motor2_tpdo1_label.setText(
             f"TPDO1: status=0x{motor2_fb.statusword:04X} err=0x{motor2_fb.error_code:04X} mode={motor2_fb.mode_display}"
